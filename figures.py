@@ -215,8 +215,6 @@ def content_figure(
     data_dir: str | Path = "data",
     smooth: int = 12,
     cmap: str = "coolwarm",
-    inset: bool | tuple[float, float, float, float] = True,
-    inset_bounds: tuple[float, float, float, float] = (0.44, 0.12, 0.54, 0.22),
     open_pdf: bool = False,
 ) -> Path:
     """Figure 2: the four-particle content of each finite-volume state.
@@ -234,9 +232,8 @@ def content_figure(
 
     The gaps are a fraction of a percent of the energy range, because the
     two-to-four vertex carries ``u_4 ~ L^(-9/2)``, so at full scale an avoided
-    crossing is only a kink.  ``inset`` therefore magnifies the lowest one;
-    pass an explicit ``(mL_lo, mL_hi, E_lo, E_hi)`` to choose another, or
-    ``False`` for no inset.  ``inset_bounds`` places it in axes coordinates.
+    crossing reads as a kink in the track and a short gradient in its colour
+    rather than as a visible separation.
     """
     mLs = np.asarray(result["mLs"], dtype=float)
     couplings = couplings or result["couplings"]
@@ -265,23 +262,6 @@ def content_figure(
     _, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
     norm = Normalize(vmin=0.0, vmax=1.0)
     _draw_tracks(ax, mLs, energies, content, norm=norm, cmap=cmap, smooth=smooth)
-
-    box = inset if isinstance(inset, tuple) else (
-        _crossing_box(mLs, energies, content, emin, emax) if inset else None
-    )
-    if box is not None:
-        zoom = ax.inset_axes(inset_bounds)
-        _draw_tracks(zoom, mLs, energies, content, norm=norm, cmap=cmap,
-                     smooth=smooth, lw=1.0)
-        zoom.set_xlim(box[0], box[1])
-        zoom.set_ylim(box[2], box[3])
-        zoom.tick_params(labelsize=5, length=2, pad=1)
-        zoom.xaxis.set_major_locator(plt.MaxNLocator(3))
-        zoom.yaxis.set_major_locator(plt.MaxNLocator(3))
-        zoom.set_facecolor("white")
-        for spine in zoom.spines.values():
-            spine.set_linewidth(0.6)
-        ax.indicate_inset_zoom(zoom, edgecolor="0.45", linewidth=0.6, alpha=0.9)
 
     bar = plt.colorbar(
         ScalarMappable(norm=norm, cmap=cmap), ax=ax, pad=0.02, aspect=45
@@ -314,55 +294,6 @@ def _is_shifted(free: Any, shifted: Any, tol: float = 1e-10) -> bool:
         if a.shape != b.shape or not np.allclose(a, b, rtol=0.0, atol=tol):
             return True
     return False
-
-
-def _crossing_box(
-    mLs: Array,
-    energies: Array,
-    content: Array,
-    emin: float,
-    emax: float,
-    pad_mL: float = 0.45,
-    pad_E: float = 2.5,
-) -> tuple[float, float, float, float] | None:
-    """A box around the lowest avoided crossing, to magnify in an inset.
-
-    Two levels avoid each other where their separation passes through a local
-    minimum while the four-particle content of each swaps from one sector to
-    the other.  Of those, the one lowest in energy is taken.  The box is
-    ``+-pad_mL`` wide and ``pad_E`` gaps tall, so that the gap itself fills a
-    good fraction of the inset and the two branches are seen bending apart
-    rather than only their point of closest approach.
-    """
-    best: tuple[float, float, float] | None = None
-    for a in range(energies.shape[1]):
-        for b in range(a + 1, energies.shape[1]):
-            both = np.isfinite(energies[:, a]) & np.isfinite(energies[:, b])
-            if both.sum() < 5:
-                continue
-            separation = np.abs(energies[both, b] - energies[both, a])
-            k = int(np.argmin(separation))
-            if k == 0 or k == separation.size - 1:
-                continue  # closest at an end: not a crossing inside the scan
-            swap = abs(content[both, a][0] - content[both, a][-1])
-            centre = 0.5 * (energies[both, a][k] + energies[both, b][k])
-            if (
-                separation[k] < 0.4 * np.median(separation)
-                and swap > 0.5
-                and emin < centre < emax
-                and (best is None or centre < best[0])
-            ):
-                best = (centre, mLs[both][k], separation[k])
-    if best is None:
-        return None
-    centre, mL, gap = best
-    half = max(pad_E * gap, 0.04)
-    return (
-        max(mL - pad_mL, mLs[0]),
-        min(mL + pad_mL, mLs[-1]),
-        max(centre - half, emin),
-        min(centre + half, emax),
-    )
 
 
 def _draw_tracks(
