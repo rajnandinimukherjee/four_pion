@@ -215,6 +215,8 @@ def content_figure(
     data_dir: str | Path = "data",
     smooth: int = 12,
     cmap: str = "coolwarm",
+    background: bool = True,
+    match_axes: bool = True,
     open_pdf: bool = False,
 ) -> Path:
     """Figure 2: the four-particle content of each finite-volume state.
@@ -234,6 +236,16 @@ def content_figure(
     two-to-four vertex carries ``u_4 ~ L^(-9/2)``, so at full scale an avoided
     crossing reads as a kink in the track and a short gradient in its colour
     rather than as a visible separation.
+
+    ``background`` draws the free levels and the ones shifted by ``V^d`` behind
+    the tracks, as in ``spectrum_figure``.  They are grey rather than carrying
+    the sector colours of that figure, because here blue and red already mean
+    the two ends of the content scale and pale red or blue background lines
+    would read as content values.
+
+    ``match_axes`` grows the canvas so that the drawing area itself, not the
+    whole page, is the size it has in ``spectrum_figure``; the colour bar then
+    sits outside that area instead of eating into it.
     """
     mLs = np.asarray(result["mLs"], dtype=float)
     couplings = couplings or result["couplings"]
@@ -259,8 +271,33 @@ def content_figure(
                 continue
             content[index, column] = qc.content(float(energy))[-1]
 
-    _, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
+    target = (
+        _drawing_area(figsize, (mLs[0], mLs[-1]), (emin, emax))
+        if match_axes
+        else None
+    )
+
+    figure, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
     norm = Normalize(vmin=0.0, vmax=1.0)
+
+    if background:
+        sector_list = [int(N) for N in np.asarray(result["sectors"]).tolist()]
+        for N in sector_list:
+            _draw(ax, mLs, pad_levels(result[f"free{N}"]), "0.6", alpha=0.6,
+                  lw=0.5, zorder=1,
+                  label="free levels" if N == sector_list[0] else None)
+        drawn = False
+        for N in sector_list:
+            if not _is_shifted(result[f"free{N}"], result[f"shifted{N}"]):
+                continue
+            _draw(ax, mLs, pad_levels(result[f"shifted{N}"]), "0.35", alpha=0.7,
+                  lw=0.5, linestyle=(0, (4, 2)), zorder=2,
+                  label=None if drawn else r"$+\hat{V}^{\sf d}_L$")
+            drawn = True
+        # Clear of the ground state below it and of the next level above it.
+        ax.legend(loc="lower left", bbox_to_anchor=(0.015, 0.09), fontsize=6,
+                  framealpha=0.9)
+
     _draw_tracks(ax, mLs, energies, content, norm=norm, cmap=cmap, smooth=smooth)
 
     bar = plt.colorbar(
@@ -274,7 +311,64 @@ def content_figure(
     ax.set_xlim([mLs[0], mLs[-1]])
     ax.set_ylim([emin, emax])
 
+    if target is not None:
+        _grow_to_drawing_area(figure, ax, target)
+
     return _save(filename, open_pdf)
+
+
+def _drawing_area(
+    figsize: tuple[float, float],
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+) -> tuple[float, float]:
+    """The size in inches of the axes of a figure with no colour bar.
+
+    This is what ``spectrum_figure`` gets out of ``figsize``: the page less the
+    space constrained layout gives the labels, the ticks and the title.  It is
+    measured on a bare figure carrying the same decorations rather than stored
+    as a number, so that it follows any change to them.  The limits matter:
+    they set how wide the tick labels are, and so how much margin constrained
+    layout keeps for them.
+    """
+    figure, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_xlabel(r"$mL$", size=12)
+    ax.set_ylabel(r"$E/m$", size=12)
+    ax.set_title("x", size=8)
+    figure.draw_without_rendering()
+    box = ax.get_position()
+    size = (box.width * figure.get_figwidth(), box.height * figure.get_figheight())
+    plt.close(figure)
+    return size
+
+
+def _grow_to_drawing_area(
+    figure: Any,
+    ax: Any,
+    target: tuple[float, float],
+    rounds: int = 20,
+    tol: float = 1e-4,
+) -> None:
+    """Resize the canvas until the axes itself has the target size.
+
+    Adding to the page adds almost, but not exactly, the same amount to the
+    axes, since the colour bar takes a fixed fraction of what is left over.
+    Iterating on the residual converges geometrically and is self-correcting,
+    which a one-shot analytic allowance for the colour bar would not be.
+    """
+    for _ in range(rounds):
+        figure.draw_without_rendering()
+        box = ax.get_position()
+        width = box.width * figure.get_figwidth()
+        height = box.height * figure.get_figheight()
+        grow_w, grow_h = target[0] - width, target[1] - height
+        if abs(grow_w) < tol and abs(grow_h) < tol:
+            return
+        figure.set_size_inches(
+            figure.get_figwidth() + grow_w, figure.get_figheight() + grow_h
+        )
 
 
 def _is_shifted(free: Any, shifted: Any, tol: float = 1e-10) -> bool:
@@ -305,6 +399,7 @@ def _draw_tracks(
     cmap: str,
     smooth: int,
     lw: float = 1.3,
+    zorder: float = 3.0,
 ) -> None:
     """Draw every level as one continuous line, coloured by its content.
 
@@ -327,7 +422,8 @@ def _draw_tracks(
             points = np.column_stack([fine, levels]).reshape(-1, 1, 2)
             segments = np.concatenate([points[:-1], points[1:]], axis=1)
             line = LineCollection(
-                segments, cmap=cmap, norm=norm, linewidth=lw, capstyle="round"
+                segments, cmap=cmap, norm=norm, linewidth=lw, capstyle="round",
+                zorder=zorder,
             )
             line.set_array(np.clip(0.5 * (weights[:-1] + weights[1:]), 0.0, 1.0))
             ax.add_collection(line)
@@ -355,6 +451,7 @@ def _draw(
     lw: float,
     label: str | None = None,
     linestyle: Any = "-",
+    zorder: float = 2.0,
 ) -> None:
     for column in range(levels.shape[1]):
         ax.plot(
@@ -364,6 +461,7 @@ def _draw(
             alpha=alpha,
             lw=lw,
             ls=linestyle,
+            zorder=zorder,
             label=label if column == 0 else None,
         )
 
