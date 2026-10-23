@@ -7,7 +7,8 @@ truncated Hamiltonian in the ``A_1^+`` orbit basis,
 
 with the same ingredients that build ``G``: the non-interacting energies, the
 disconnected blocks inside each degenerate level, and the rank-one connected
-vertex of eq. (2.11).  The matrix determinant lemma turns ``det[E - H] = 0``
+vertex of eq. (2.11), whose factors carry the square root of the regulator
+weight of their level (``GFunction.u_weighted``).  The matrix determinant lemma turns ``det[E - H] = 0``
 into
 
     det[E - H^(0) - V^d] det[1 - G(E, L) lambda] = 0 ,
@@ -27,7 +28,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from tqdm import tqdm
 
-from gfunctions import Couplings
+from gfunctions import Couplings, Cutoff
 from quantisation_condition import QC, SECTORS, pad_levels
 from utils import call_PDF
 
@@ -66,7 +67,7 @@ def hamiltonian(qc: QC) -> tuple[Array, Array]:
             coupling = qc.couplings[(N_out, N_in)]
             if coupling == 0.0:
                 continue
-            block = coupling * np.outer(out.u, inside.u)
+            block = coupling * np.outer(out.u_weighted, inside.u_weighted)
             matrix[
                 offsets[row] : offsets[row + 1], offsets[column] : offsets[column + 1]
             ] += block
@@ -91,9 +92,8 @@ def scan_volumes(
     couplings: Couplings,
     emin: float = 1.9,
     emax: float = 6.0,
-    cutoff: float = 10.0,
+    cutoff: Cutoff | float = 10.0,
     sectors: Sequence[int] = SECTORS,
-    alpha: float = 0.0,
     data_dir: str = "data",
     verbose: bool = True,
 ) -> dict[str, Any]:
@@ -111,7 +111,6 @@ def scan_volumes(
             sectors=sectors,
             cutoff=cutoff,
             mL_ref=float(mLs.max()),
-            alpha=alpha,
             data_dir=data_dir,
             tables=tables,
         )

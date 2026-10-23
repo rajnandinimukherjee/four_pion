@@ -79,7 +79,7 @@ def spectrum_figure(
 def content_figure(
     result: Mapping[str, Any],
     couplings: Couplings | None = None,
-    cutoff: float | None = None,
+    cutoff: Any | None = None,
     emin: float = 1.95,
     emax: float = 6.0,
     filename: str | Path = "plots/ME_24.pdf",
@@ -95,8 +95,7 @@ def content_figure(
     """
     mLs = np.asarray(result["mLs"], dtype=float)
     couplings = couplings or result["couplings"]
-    cutoff = float(result["cutoff"]) if cutoff is None else cutoff
-    alpha = float(result.get("alpha", 0.0))
+    cutoff = result.get("cutoff_object", result["cutoff"]) if cutoff is None else cutoff
 
     energies = pad_levels(result["roots"])
     content = np.full_like(energies, np.nan)
@@ -109,7 +108,6 @@ def content_figure(
             sectors=sectors,
             cutoff=cutoff,
             mL_ref=float(mLs.max()),
-            alpha=alpha,
             data_dir=data_dir,
             tables=tables,
         )
@@ -177,7 +175,7 @@ def _save(filename: str | Path, open_pdf: bool) -> Path:
 def main(
     mLs: ArrayLike | None = None,
     couplings: Couplings | None = None,
-    cutoff: float = 10.0,
+    cutoff: Any = 10.0,
     emin: float = 1.9,
     emax: float = 6.0,
     open_pdf: bool = False,

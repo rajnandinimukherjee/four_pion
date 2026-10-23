@@ -53,19 +53,36 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
         help="energy cutoff EMAX on the sums inside G (default: 10)",
     )
     parser.add_argument(
-        "--alpha",
+        "--cutoff-shape",
+        choices=("smooth", "hard"),
+        default="smooth",
+        help="regulator on the sums inside G: a smooth taper to zero at EMAX "
+        "(smooth, the default) or the step Theta(EMAX - E0) of the notes (hard)",
+    )
+    parser.add_argument(
+        "--cutoff-width",
         type=float,
-        default=0.0,
-        help="smooth damping exp(alpha (E - E_pole)) of the cutoff (default: 0)",
+        default=2.0,
+        help="energy range over which the smooth cutoff falls to zero, so that "
+        "the weight is 1 below EMAX - width (default: 2)",
     )
     parser.add_argument("--sectors", nargs="+", type=int, default=(2, 4),
                         help=SECTORS_HELP)
-    parser.add_argument("--coarse-points", type=int, default=2000)
+    parser.add_argument(
+        "--root-method",
+        choices=("auto", "count", "grid"),
+        default="auto",
+        help="root search: exact root counting (count), the grid search (grid), "
+        "or count (auto, the default); both cutoff shapes admit counting",
+    )
+    parser.add_argument(
+        "--coarse-points", type=int, default=2000, help="grid points (grid method)"
+    )
     parser.add_argument(
         "--delta",
         type=float,
         default=1e-11,
-        help="half-width of the bracket isolating each pole of G",
+        help="half-width of the bracket isolating each pole of G (grid method)",
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
 
@@ -157,8 +174,10 @@ def _scan(args: argparse.Namespace, load: bool = True) -> dict[str, Any]:
         emin=emin,
         emax=emax,
         cutoff=args.cutoff,
-        alpha=args.alpha,
+        shape=args.cutoff_shape,
+        width=args.cutoff_width,
         sectors=tuple(args.sectors),
+        method=args.root_method,
         n_coarse=args.coarse_points,
         delta=args.delta,
         save=not getattr(args, "no_save", False),
@@ -209,6 +228,7 @@ def _run_figures(args: argparse.Namespace) -> None:
 
 def _run_diagonalise(args: argparse.Namespace) -> None:
     from analytic_roots import plot_levels, scan_volumes
+    from gfunctions import Cutoff
 
     mLs, couplings, emin, emax = _scan_configuration(args)
     result = scan_volumes(
@@ -216,9 +236,8 @@ def _run_diagonalise(args: argparse.Namespace) -> None:
         couplings,
         emin=emin,
         emax=emax,
-        cutoff=args.cutoff,
+        cutoff=Cutoff(args.cutoff, args.cutoff_shape, args.cutoff_width),
         sectors=tuple(args.sectors),
-        alpha=args.alpha,
         data_dir=str(args.data_dir),
     )
     plot_levels(

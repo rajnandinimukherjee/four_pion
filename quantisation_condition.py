@@ -12,14 +12,20 @@ two- and four-particle sectors contribute.  The disconnected ``2 -> 2`` and
 ``3 -> 3`` sub-processes enter through ``G_{44}``, driven by the same
 ``lambda_{2<-2}`` and by ``lambda_{3<-3}``.
 
-The root search uses the pole-free form of the condition,
+The root search uses the form of the condition
 
     f(E) = det[ 1 - G(E, L) lambda ] ,
 
-which has the same zeros wherever ``G`` is invertible.  Because the poles of
-``G`` are known exactly -- they are the non-interacting levels shifted and split
-by ``V^d`` -- the search grid is built around them and the brackets that
-straddle a pole are discarded, so no spurious roots are produced.
+which has the same zeros wherever ``G`` is invertible.  The default is
+``root_finding.py``: whichever cutoff shape is used, ``G`` is a sum of simple
+poles with non-negative residues, so the roots between two poles can be counted
+exactly and each is solved for relative to its nearest pole.  With
+``method="grid"`` a search grid is built around the known poles of ``G`` and the
+brackets that straddle a pole are discarded instead; that search misses roots
+closer than ``delta`` to a pole and pairs of roots inside one grid cell.
+
+The sums inside ``G`` are regulated by a smooth cutoff by default, see
+``gfunctions.Cutoff``; ``shape="hard"`` recovers the step of the notes.
 
 Usage
 -----
@@ -40,16 +46,31 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.optimize import root_scalar
 from tqdm import tqdm
 
-from gfunctions import Couplings, GFunction, GMatrix
+from gfunctions import Couplings, Cutoff, GFunction, GMatrix
 from orbits import OrbitTable, load_orbits
 from plot_settings import plotparams
 from utils import call_PDF
 
 Array = NDArray[Any]
 
+EPS = np.finfo(float).eps
+
 plt.rcParams.update(plotparams)
 
 SECTORS: tuple[int, ...] = (2, 4)
+ROOT_METHODS: tuple[str, ...] = ("auto", "count", "grid")
+
+
+def resolve_root_method(method: str) -> str:
+    """Resolve ``auto`` to root counting, which is valid for either cutoff.
+
+    Both cutoff shapes weight each level by a non-negative constant, so ``G``
+    is a sum of simple poles with non-negative residues and the counting of
+    ``root_finding.py`` applies.  ``grid`` remains available as a cross-check.
+    """
+    if method not in ROOT_METHODS:
+        raise ValueError(f"unknown root method {method!r}; use one of {ROOT_METHODS}")
+    return "count" if method == "auto" else method
 
 
 class QC:
@@ -64,14 +85,17 @@ class QC:
     sectors:
         Particle numbers retained; ``(2, 4)`` for section 3.1.
     cutoff:
-        Energy cutoff ``E_max`` on the sums over levels inside ``G``.  This is a
-        regulator: the states above it are smooth and are absorbed into the
-        couplings, so the couplings depend on it (see ``regulators.py``).
+        The regulator on the sums over levels inside ``G``: a ``Cutoff``, or a
+        bare ``E_max`` to be combined with ``shape`` and ``width``.  The states
+        above it are smooth and are absorbed into the couplings, so the
+        couplings depend on it.
+    shape, width:
+        Used only when ``cutoff`` is a bare number.  ``shape="smooth"`` (the
+        default) tapers the sums to zero over the last ``width`` in energy;
+        ``shape="hard"`` is the step of the notes.
     mL_ref:
         Reference ``mL`` of the saved orbit tables.  It must be at least the
         largest ``mL`` used, so that the tables cover every volume in a scan.
-    alpha:
-        Optional smooth damping of the cutoff, ``exp(alpha (E - E_pole))``.
     """
 
     def __init__(
@@ -79,27 +103,29 @@ class QC:
         couplings: Couplings,
         mL: float,
         sectors: Sequence[int] = SECTORS,
-        cutoff: float = 10.0,
+        cutoff: Cutoff | float = 10.0,
+        shape: str = "smooth",
+        width: float = 2.0,
         mL_ref: float | None = None,
-        alpha: float = 0.0,
         data_dir: str | Path = "data",
         tables: Mapping[int, OrbitTable] | None = None,
     ) -> None:
         self.mL = float(mL)
         self.sectors = tuple(sectors)
-        self.cutoff = float(cutoff)
-        self.alpha = float(alpha)
+        self.cutoff: Cutoff = Cutoff.parse(cutoff, shape, width)
         self.mL_ref = float(mL_ref) if mL_ref is not None else float(mL)
 
         if tables is None:
             tables = {
-                N: load_orbits(N, emax=cutoff, mL=self.mL_ref, data_dir=data_dir)
+                N: load_orbits(
+                    N, emax=self.cutoff.support, mL=self.mL_ref, data_dir=data_dir
+                )
                 for N in self.sectors
             }
         self.tables: dict[int, OrbitTable] = dict(tables)
         self.G = GMatrix(
             {
-                N: GFunction(self.tables[N], mL=self.mL, emax=cutoff, alpha=alpha)
+                N: GFunction(self.tables[N], mL=self.mL, cutoff=self.cutoff)
                 for N in self.sectors
             }
         )
@@ -190,18 +216,28 @@ class QC:
         self,
         emin: float,
         emax: float,
+        method: str = "auto",
         n_coarse: int = 2000,
         delta: float = 1e-11,
         verbose: bool = False,
     ) -> Array:
-        """Solve the quantization condition in a window."""
+        """Solve the quantization condition in a window.
+
+        ``method`` is ``"count"`` (``root_finding.py``, exact root counting),
+        ``"grid"`` (the grid search; ``n_coarse`` and ``delta`` only apply to
+        it), or ``"auto"``, which is ``count``.
+        """
+        if resolve_root_method(method) == "count":
+            from root_finding import roots_newton
+
+            return roots_newton(self, emin, emax)
         grid = energy_grid(emin, emax, self.poles, n_coarse=n_coarse, delta=delta)
         return find_roots(self, grid, self.poles, verbose=verbose)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (
-            f"QC(mL={self.mL:g}, sectors={self.sectors}, cutoff={self.cutoff:g}, "
-            f"alpha={self.alpha:g}, {self.couplings.label()})"
+            f"QC(mL={self.mL:g}, sectors={self.sectors}, "
+            f"{self.cutoff.label()}, {self.couplings.label()})"
         )
 
 
@@ -254,7 +290,9 @@ def find_roots(
             if first < len(poles) and poles[first] < high:
                 skipped += 1
                 continue
-        solution = root_scalar(func, bracket=[low, high], method="brentq")
+        solution = root_scalar(
+            func, bracket=[low, high], method="brentq", xtol=1e-300, rtol=4 * EPS
+        )
         roots.append(float(solution.root))
         if verbose:
             iterator.set_description(f"{len(roots)} root(s)")
@@ -274,16 +312,16 @@ def scan_filename(
     mLs: ArrayLike,
     emin: float,
     emax: float,
-    cutoff: float,
-    alpha: float,
+    cutoff: Cutoff,
     data_dir: str | os.PathLike[str] = "data",
+    method: str = "count",
 ) -> Path:
-    """Stable cache path of a volume scan."""
+    """Stable cache path of a volume scan; ``method`` is the resolved root method."""
     mLs = np.asarray(mLs, dtype=float)
     stem = (
         f"spectrum_{couplings.label()}"
         f"_mL{mLs[0]:g}-{mLs[-1]:g}_NL{len(mLs)}"
-        f"_E{emin:g}-{emax:g}_EMAX{cutoff:g}_alpha{alpha:g}"
+        f"_E{emin:g}-{emax:g}_{cutoff.label()}_{method}"
     )
     return Path(data_dir) / f"{stem}.npz"
 
@@ -293,9 +331,11 @@ def scan_volumes(
     couplings: Couplings,
     emin: float = 1.9,
     emax: float = 6.0,
-    cutoff: float = 10.0,
-    alpha: float = 0.0,
+    cutoff: Cutoff | float = 10.0,
+    shape: str = "smooth",
+    width: float = 2.0,
     sectors: Sequence[int] = SECTORS,
+    method: str = "auto",
     n_coarse: int = 2000,
     delta: float = 1e-11,
     save: bool = True,
@@ -306,17 +346,22 @@ def scan_volumes(
     """Solve the quantization condition over a range of volumes.
 
     Returns a dictionary with the roots, the free levels of each sector and the
-    levels including the disconnected shifts, one entry per volume.
+    levels including the disconnected shifts, one entry per volume.  ``method``
+    is passed to ``QC.roots``.
     """
     mLs = np.asarray(mLs, dtype=float)
-    path = scan_filename(couplings, mLs, emin, emax, cutoff, alpha, data_dir)
+    cutoff = Cutoff.parse(cutoff, shape, width)
+    resolved = resolve_root_method(method)
+    path = scan_filename(couplings, mLs, emin, emax, cutoff, data_dir, resolved)
     if load and path.exists():
         if verbose:
             print(f"[info] loading {path}")
         return load_scan(path)
 
     tables = {
-        N: load_orbits(N, emax=cutoff, mL=float(mLs.max()), data_dir=data_dir)
+        N: load_orbits(
+            N, emax=cutoff.support, mL=float(mLs.max()), data_dir=data_dir
+        )
         for N in sectors
     }
 
@@ -332,10 +377,11 @@ def scan_volumes(
             sectors=sectors,
             cutoff=cutoff,
             mL_ref=float(mLs.max()),
-            alpha=alpha,
             tables=tables,
         )
-        roots[index] = qc.roots(emin, emax, n_coarse=n_coarse, delta=delta)
+        roots[index] = qc.roots(
+            emin, emax, method=resolved, n_coarse=n_coarse, delta=delta
+        )
         for N in sectors:
             free[N][index] = qc.free_levels(N, emin, emax)
             shifted[N][index] = qc.shifted_levels(N, emin, emax)
@@ -348,8 +394,10 @@ def scan_volumes(
         "sectors": np.array(sectors),
         "emin": emin,
         "emax": emax,
-        "cutoff": cutoff,
-        "alpha": alpha,
+        "cutoff": cutoff.emax,
+        "shape": cutoff.shape,
+        "width": cutoff.width,
+        "method": resolved,
         "couplings": couplings,
     }
     for N in sectors:
@@ -360,6 +408,8 @@ def scan_volumes(
         save_scan(path, result)
         if verbose:
             print(f"[info] saved {path}")
+    # Kept out of the file, where the cutoff is stored as its three fields.
+    result["cutoff_object"] = cutoff
     return result
 
 
@@ -376,8 +426,17 @@ def save_scan(path: str | os.PathLike[str], result: Mapping[str, Any]) -> Path:
 def load_scan(path: str | os.PathLike[str]) -> dict[str, Any]:
     with np.load(Path(path), allow_pickle=True) as data:
         result = {key: data[key] for key in data.files}
-    for key in ("emin", "emax", "cutoff", "alpha"):
-        result[key] = float(result[key])
+    for key in ("emin", "emax", "cutoff", "width"):
+        if key in result:
+            result[key] = float(result[key])
+    for key in ("method", "shape"):
+        if key in result:
+            result[key] = str(result[key])
+    result["cutoff_object"] = Cutoff(
+        emax=result["cutoff"],
+        shape=result.get("shape", "hard"),
+        width=result.get("width", 2.0),
+    )
     result["couplings"] = Couplings(eval(str(result["couplings"])))
     return result
 

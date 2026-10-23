@@ -105,6 +105,107 @@ class Couplings:
 
 
 # ---------------------------------------------------------------------------
+# the regulator
+# ---------------------------------------------------------------------------
+
+SHAPES: tuple[str, ...] = ("smooth", "hard")
+
+
+def smooth_step(x: ArrayLike) -> Array:
+    """The ``C^infinity`` step: 0 for ``x <= 0``, 1 for ``x >= 1``.
+
+    Built from ``f(x) = exp(-1/x)``, whose derivatives all vanish at the ends,
+    as ``f(x) / (f(x) + f(1 - x))``.
+    """
+    x = np.clip(np.asarray(x, dtype=float), 0.0, 1.0)
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        rising = np.where(x > 0.0, np.exp(-1.0 / np.where(x > 0.0, x, 1.0)), 0.0)
+        falling = np.where(
+            x < 1.0, np.exp(-1.0 / np.where(x < 1.0, 1.0 - x, 1.0)), 0.0
+        )
+    return rising / (rising + falling)
+
+
+@dataclass(frozen=True)
+class Cutoff:
+    """The regulator on the sums over levels inside ``G``.
+
+    A level of non-interacting energy ``E^(0)`` enters ``G`` with the weight
+    ``w(E^(0))``, so that
+
+        G_NN(E, L) = sum_k w(E_k) r_k / (E - E_k) .
+
+    ``shape = "smooth"`` is the default: ``w = 1`` below ``emax - width`` and a
+    ``C^infinity`` transition to 0 at ``emax``.  A sharp ``w`` makes the
+    summand discontinuous across the cutoff surface and so produces power-law
+    volume effects (appendix B.3 and B.4); a smooth one leaves only corrections
+    that fall faster than any power of ``L``.
+
+    ``shape = "hard"`` is the step ``Theta(emax - E^(0))`` used in the notes,
+    kept for comparison.
+
+    Either way the states above the cutoff are smooth in ``E`` and are absorbed
+    into the couplings, so both ``emax`` and ``width`` are regulator parameters
+    on which the couplings depend.  The weights are constants, non-negative and
+    independent of ``E``, so ``G`` stays a sum of simple poles with
+    non-negative residues, which is what ``root_finding.py`` relies on.
+    """
+
+    emax: float = 10.0
+    shape: str = "smooth"
+    width: float = 2.0
+
+    def __post_init__(self) -> None:
+        if self.shape not in SHAPES:
+            raise ValueError(f"unknown cutoff shape {self.shape!r}; use {SHAPES}")
+        if self.shape == "smooth" and not 0.0 < self.width <= self.emax:
+            raise ValueError("the smooth cutoff needs 0 < width <= emax")
+
+    @classmethod
+    def smooth(cls, emax: float, width: float = 2.0) -> "Cutoff":
+        return cls(emax=float(emax), shape="smooth", width=float(width))
+
+    @classmethod
+    def hard(cls, emax: float) -> "Cutoff":
+        return cls(emax=float(emax), shape="hard")
+
+    @classmethod
+    def parse(
+        cls, cutoff: "Cutoff | float", shape: str = "smooth", width: float = 2.0
+    ) -> "Cutoff":
+        """Accept either a ``Cutoff`` or a bare ``emax`` with shape and width."""
+        if isinstance(cutoff, Cutoff):
+            return cutoff
+        return cls(emax=float(cutoff), shape=shape, width=float(width))
+
+    def weight(self, energies: ArrayLike) -> Array:
+        """The weight ``w(E^(0))`` of each level."""
+        energies = np.asarray(energies, dtype=float)
+        if self.shape == "hard":
+            return (energies <= self.emax).astype(float)
+        return smooth_step((self.emax - energies) / self.width)
+
+    @property
+    def support(self) -> float:
+        """Energy above which the weight vanishes."""
+        return self.emax
+
+    def label(self) -> str:
+        """Filename-safe tag."""
+        if self.shape == "hard":
+            return f"EMAX{self.emax:g}_hard"
+        return f"EMAX{self.emax:g}_smooth{self.width:g}"
+
+    def __str__(self) -> str:
+        if self.shape == "hard":
+            return f"hard cutoff at E_max = {self.emax:g}"
+        return (
+            f"smooth cutoff, w = 1 below {self.emax - self.width:g} "
+            f"and 0 at E_max = {self.emax:g}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # one particle-number sector
 # ---------------------------------------------------------------------------
 
@@ -118,28 +219,24 @@ class GFunction:
         Table written by ``orbits.py`` for this sector.
     mL:
         Box size in units of the mass.
-    emax:
-        Energy cutoff retained in the sum over levels.  The states above it are
-        smooth in ``E`` and are absorbed into the couplings (appendix B), so
-        this is a regulator and the couplings depend on it.
-    alpha:
-        Optional smooth damping ``exp(alpha (E - E_pole))`` applied to each
-        pole, softening the hard cutoff as discussed in appendix B.
+    cutoff:
+        The regulator, a ``Cutoff`` or a bare ``emax`` (then smooth, with the
+        default width).  Levels enter weighted by ``cutoff.weight``.
     """
 
     def __init__(
         self,
         orbits: OrbitTable,
         mL: float,
-        emax: float | None = None,
-        alpha: float = 0.0,
+        cutoff: Cutoff | float = 10.0,
+        shape: str = "smooth",
+        width: float = 2.0,
     ) -> None:
         self.orbits = orbits
         self.N: int = orbits.N
         self.mL = float(mL)
         self.tpiL: float = 2 * np.pi / self.mL
-        self.emax = emax
-        self.alpha = float(alpha)
+        self.cutoff: Cutoff = Cutoff.parse(cutoff, shape, width)
 
         self._select_orbits()
         self._build_u()
@@ -151,13 +248,15 @@ class GFunction:
         self.residues: Array = np.zeros(0)
         self.set_couplings(Couplings())
 
+    @property
+    def emax(self) -> float:
+        return self.cutoff.emax
+
     # -- construction -------------------------------------------------------
 
     def _select_orbits(self) -> None:
         energies = self.orbits.energies(self.mL)
-        keep = np.ones(len(energies), dtype=bool) if self.emax is None else (
-            energies <= self.emax
-        )
+        keep = energies <= self.cutoff.support
         self.index: Array = np.flatnonzero(keep)
         self.energies: Array = energies[keep]
         self.sizes: Array = self.orbits.sizes[keep]
@@ -184,6 +283,22 @@ class GFunction:
         self.level_energies: Array = np.array(
             [self.energies[members[0]] for members in self.level_members], dtype=float
         )
+        # The regulator acts on the non-interacting energy of the level, so it
+        # is one constant per level and leaves the V^d blocks untouched.
+        self.level_weights: Array = self.cutoff.weight(self.level_energies)
+
+    @property
+    def u_weighted(self) -> Array:
+        """``sqrt(w) u_mu``: the vertex factors as the regulator leaves them.
+
+        ``G`` is unchanged if the weight is moved from each level onto the two
+        vertex factors it sits between, which is the form the truncated
+        Hamiltonian of ``analytic_roots.py`` needs.
+        """
+        weights = np.ones(len(self.u), dtype=float)
+        for level, members in enumerate(self.level_members):
+            weights[members] = self.level_weights[level]
+        return np.sqrt(weights) * self.u
 
     def _build_disconnected(self) -> None:
         """Assemble the ``V^d`` block of every level, per sub-process size ``r``.
@@ -269,7 +384,7 @@ class GFunction:
             self.level_shifts.append(shifts)
             self.level_vectors.append(vectors)
             poles.extend((self.level_energies[level] + shifts).tolist())
-            residues.extend((overlaps**2).tolist())
+            residues.extend((self.level_weights[level] * overlaps**2).tolist())
 
         order = np.argsort(poles)
         self.poles = np.asarray(poles, dtype=float)[order]
@@ -280,17 +395,19 @@ class GFunction:
     def __call__(self, E: ArrayLike) -> Any:
         energies = np.atleast_1d(np.asarray(E, dtype=float))
         gaps = energies[:, None] - self.poles[None, :]
-        damping = np.exp(self.alpha * gaps) if self.alpha else 1.0
-        result = np.sum(damping * self.residues[None, :] / gaps, axis=-1)
+        result = np.sum(self.residues[None, :] / gaps, axis=-1)
         return result[0] if np.size(E) == 1 else result
 
     def derivative(self, E: ArrayLike) -> Any:
-        """``dG/dE``.  Its magnitude sets the residue of a finite-volume pole."""
+        """``dG/dE``.  Its magnitude sets the residue of a finite-volume pole.
+
+        The residues are non-negative, so this is never positive: ``G`` falls
+        monotonically between its poles, which is what makes the root counting
+        of ``root_finding.py`` exact.
+        """
         energies = np.atleast_1d(np.asarray(E, dtype=float))
         gaps = energies[:, None] - self.poles[None, :]
-        damping = np.exp(self.alpha * gaps) if self.alpha else 1.0
-        terms = damping * self.residues[None, :] * (self.alpha / gaps - 1.0 / gaps**2)
-        result = np.sum(terms, axis=-1)
+        result = -np.sum(self.residues[None, :] / gaps**2, axis=-1)
         return result[0] if np.size(E) == 1 else result
 
     def levels_in(self, emin: float, emax: float) -> Array:
@@ -333,24 +450,24 @@ class GMatrix:
         cls,
         sectors: Iterable[int],
         mL: float,
-        emax: float,
+        cutoff: Cutoff | float = 10.0,
         mL_ref: float | None = None,
-        alpha: float = 0.0,
         data_dir: str | Path = "data",
         paths: Mapping[int, str | Path] | None = None,
     ) -> "GMatrix":
         """Load one orbit table per sector and build the finite-volume functions."""
+        cutoff = Cutoff.parse(cutoff)
         paths = dict(paths or {})
         functions = {}
         for N in sectors:
             table = load_orbits(
                 N,
-                emax=emax,
+                emax=cutoff.support,
                 mL=mL_ref,
                 data_dir=data_dir,
                 path=paths.get(N),
             )
-            functions[N] = GFunction(table, mL=mL, emax=emax, alpha=alpha)
+            functions[N] = GFunction(table, mL=mL, cutoff=cutoff)
         return cls(functions)
 
     def set_couplings(self, couplings: Couplings) -> None:

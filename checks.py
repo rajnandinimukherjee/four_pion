@@ -11,8 +11,13 @@ calculation:
     including the ``lambda_{2<-2}``, ``lambda_{3<-3}`` and ``lambda_{4<-4}``
     terms,
 4.  ``V^d``:     symmetry of the disconnected blocks in every degenerate level,
+4b. the cutoff: the smooth weights are in ``[0, 1]`` and non-increasing, and
+    reduce to the hard step as the width goes to zero,
 5.  the roots:   against the eigenvalues of the truncated Hamiltonian, which
-    the matrix determinant lemma says must agree.
+    the matrix determinant lemma says must agree,
+6.  root counting: ``QC.roots`` (``root_finding.py``) against the grid search,
+    and at weak couplings, where the roots sit closer to the poles than the grid
+    can see.
 """
 
 from __future__ import annotations
@@ -26,8 +31,9 @@ from numpy.typing import NDArray
 
 import orbits
 from analytic_roots import levels as diagonalised_levels
-from gfunctions import Couplings, GFunction
+from gfunctions import Couplings, Cutoff, GFunction
 from quantisation_condition import QC
+from root_finding import roots_eig
 
 Array = NDArray[Any]
 
@@ -50,7 +56,7 @@ def check_orbit_sum(mL: float = 5.0, cutoff: float = 7.0) -> None:
     """Eq. (2.17) for ``f = 1 / Omega``, i.e. the sum rule obeyed by ``u_mu``."""
     print("orbit sum rule, N = 4")
     table = orbits.generate(N=4, emax=cutoff, mL=mL, disconnected=False, verbose=False)
-    function = GFunction(table, mL=mL, emax=cutoff)
+    function = GFunction(table, mL=mL, cutoff=Cutoff.hard(cutoff))
     from_orbits = float(np.sum(function.u**2) * mL**9)
 
     tpiL = 2 * np.pi / mL
@@ -87,7 +93,7 @@ def check_g22(mL: float = 6.0, cutoff: float = 8.0, E: float = 3.3) -> None:
     """``G_22`` against the explicit two-particle sum of section 3.1."""
     print("G_22 against the direct momentum sum")
     table = orbits.generate(N=2, emax=cutoff, mL=mL, disconnected=False, verbose=False)
-    function = GFunction(table, mL=mL, emax=cutoff)
+    function = GFunction(table, mL=mL, cutoff=Cutoff.hard(cutoff))
 
     tpiL = 2 * np.pi / mL
     radius = int(math.isqrt(max(0, int(((cutoff / 2) ** 2 - 1) / tpiL**2)))) + 1
@@ -148,7 +154,7 @@ def check_vd_symmetry(mL: float = 6.0, cutoff: float = 9.0) -> None:
     """``V^d`` must be symmetric inside every degenerate level."""
     print("V^d block symmetry")
     table = orbits.generate(N=4, emax=cutoff, mL=mL, verbose=False)
-    function = GFunction(table, mL=mL, emax=cutoff)
+    function = GFunction(table, mL=mL, cutoff=cutoff)
     worst = 0.0
     mixed = 0
     for level, blocks in enumerate(function.level_blocks):
@@ -181,13 +187,60 @@ def check_against_diagonalisation(mL: float = 5.5, cutoff: float = 8.0) -> None:
     report("largest deviation", worst, 0.0, tol=1e-8)
 
 
+def check_cutoff_shapes(mL: float = 6.0, cutoff: float = 8.0, E: float = 3.3) -> None:
+    """The smooth cutoff: weights in [0, 1], monotone, and -> hard as width -> 0."""
+    print("cutoff shapes")
+    table = orbits.generate(N=2, emax=cutoff, mL=mL, disconnected=False, verbose=False)
+    energies = table.energies(mL)
+
+    smooth = Cutoff.smooth(cutoff, width=2.0)
+    weights = smooth.weight(np.sort(energies))
+    report("weights within [0, 1]",
+           float(np.max(np.maximum(weights - 1.0, -weights))), 0.0, tol=1e-12)
+    report("weights non-increasing in E", float(np.max(np.diff(weights))), 0.0, tol=1e-12)
+    report("weight well below the cutoff", float(smooth.weight(cutoff - 3.0)), 1.0)
+    report("weight at the cutoff", float(smooth.weight(cutoff)), 0.0, tol=1e-12)
+
+    # A vanishing width is the step function, so G must reproduce the hard sum.
+    narrow = GFunction(table, mL=mL, cutoff=Cutoff.smooth(cutoff, width=1e-6))
+    hard = GFunction(table, mL=mL, cutoff=Cutoff.hard(cutoff))
+    report("G(width -> 0) == G(hard)", float(narrow(E)), float(hard(E)), tol=1e-12)
+
+
+def check_root_counting(mL: float = 5.5, cutoff: float = 8.0) -> None:
+    """``QC.roots`` (root counting) against the grid search and at weak couplings."""
+    print("root counting (root_finding.py)")
+    table2 = orbits.generate(N=2, emax=cutoff, mL=mL, verbose=False)
+    table4 = orbits.generate(N=4, emax=cutoff, mL=mL, verbose=False)
+    couplings = Couplings.two_four(l22=20.0, l24=2000.0, l44=50.0, l33=10.0)
+    qc = QC(couplings, mL=mL, cutoff=cutoff, tables={2: table2, 4: table4})
+
+    emin, emax = 2.5, 5.5
+    counted = qc.roots(emin, emax)
+    grid = qc.roots(emin, emax, method="grid")
+    if len(counted) != len(grid):
+        FAILURES.append("root counting: against grid")
+        print(f"  [FAIL] {len(counted)} counted roots, {len(grid)} from the grid")
+    else:
+        report("largest deviation from the grid search",
+               float(np.max(np.abs(counted - grid))), 0.0, tol=1e-12)
+
+    # Shifts of order 1e-12: the grid search skips them, counting must not.
+    qc.set_couplings(Couplings.two_four(l22=1.0, l24=0.01, l44=0.01))
+    roots = qc.roots(emin, emax)
+    reference = roots_eig(qc, emin, emax)
+    report("weak couplings, number of roots", float(len(roots)), float(len(reference)), tol=0.5)
+
+
 def main() -> int:
     checks: list[Callable[[], None]] = [
         check_g22,
         check_orbit_sum,
         check_thresholds,
         check_vd_symmetry,
+        check_cutoff_shapes,
         check_against_diagonalisation,
+        check_root_counting,
     ]
     for check in checks:
         check()
