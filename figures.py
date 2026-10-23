@@ -39,6 +39,11 @@ plt.rcParams.update(plotparams)
 
 COLOURS: dict[int, str] = {2: "tab:red", 4: "tab:blue", 6: "tab:green"}
 
+# Both figures are emptiest just above the two-particle ground state on the
+# left, which dips below 2m; the lower-right corner the legend would take by
+# default is where that ground state ends up.
+LEGEND_ANCHOR: tuple[float, float] = (0.015, 0.09)
+
 
 def coupling_title(couplings: Couplings) -> str:
     """The non-vanishing couplings, in the ``lambda_{N+N'}`` convention.
@@ -198,7 +203,8 @@ def spectrum_figure(
     ax.set_ylabel(r"$E/m$", size=12)
     ax.set_xlim([mLs[0], mLs[-1]])
     ax.set_ylim([emin, emax])
-    ax.legend(loc="lower right", fontsize=6.5, framealpha=0.9)
+    ax.legend(loc="lower left", bbox_to_anchor=LEGEND_ANCHOR, fontsize=6.5,
+              framealpha=0.9)
 
     return _save(filename, open_pdf)
 
@@ -294,8 +300,7 @@ def content_figure(
                   lw=0.5, linestyle=(0, (4, 2)), zorder=2,
                   label=None if drawn else r"$+\hat{V}^{\sf d}_L$")
             drawn = True
-        # Clear of the ground state below it and of the next level above it.
-        ax.legend(loc="lower left", bbox_to_anchor=(0.015, 0.09), fontsize=6,
+        ax.legend(loc="lower left", bbox_to_anchor=LEGEND_ANCHOR, fontsize=6,
                   framealpha=0.9)
 
     _draw_tracks(ax, mLs, energies, content, norm=norm, cmap=cmap, smooth=smooth)
