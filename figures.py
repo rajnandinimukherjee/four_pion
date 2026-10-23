@@ -186,9 +186,10 @@ def spectrum_figure(
         colour = COLOURS.get(N, "grey")
         _draw(ax, mLs, pad_levels(result[f"free{N}"]), colour, alpha=0.25, lw=0.7,
               label=rf"$N={N}$, free")
-        _draw(ax, mLs, pad_levels(result[f"shifted{N}"]), colour, alpha=0.75,
-              lw=0.7, linestyle=(0, (4, 2)),
-              label=rf"$N={N}$, $+\hat{{V}}^{{\sf d}}_L$")
+        if _is_shifted(result[f"free{N}"], result[f"shifted{N}"]):
+            _draw(ax, mLs, pad_levels(result[f"shifted{N}"]), colour, alpha=0.75,
+                  lw=0.7, linestyle=(0, (4, 2)),
+                  label=rf"$N={N}$, $+\hat{{V}}^{{\sf d}}_L$")
     _draw(ax, mLs, level_tracks(result["roots"]), "k", alpha=1.0, lw=1.0,
           label=r"$\det[\mathcal{G}^{-1}-\lambda]=0$")
 
@@ -294,6 +295,25 @@ def content_figure(
     ax.set_ylim([emin, emax])
 
     return _save(filename, open_pdf)
+
+
+def _is_shifted(free: Any, shifted: Any, tol: float = 1e-10) -> bool:
+    """Whether ``V^d`` moves the levels of a sector at all.
+
+    A disconnected sub-process acts on a subset of the particles and needs at
+    least one spectator, so in the two-particle sector there is nothing for
+    ``V^d`` to do: its levels are the free ones and the dashed curve would lie
+    exactly on the solid one.  The two lists are compared as sets of distinct
+    energies, since ``shifted_levels`` returns one entry per orbit of a
+    degenerate level where ``unshifted_levels`` returns one entry per level,
+    so a sector with no shift still gives the longer list.
+    """
+    for one, other in zip(free, shifted):
+        a = np.unique(np.round(np.atleast_1d(np.asarray(one, float)), 10))
+        b = np.unique(np.round(np.atleast_1d(np.asarray(other, float)), 10))
+        if a.shape != b.shape or not np.allclose(a, b, rtol=0.0, atol=tol):
+            return True
+    return False
 
 
 def _crossing_box(
