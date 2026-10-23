@@ -50,11 +50,26 @@ Methods
               pole-free function ``h(t) = t (T - t) f(t)`` in shifted
               coordinates, all roots of a window at once.  The default.
 
+Sectors
+-------
+Nothing above is specific to two sectors, and none of it is written for two:
+``lambda`` is a ``n_s x n_s`` matrix, ``f`` is the multilinear expansion of
+``det[1 - diag(g) lambda]`` over the subsets of the sectors, and the inertia is
+that of the ``n_s x n_s`` matrix ``lambda^{-1} - G``.  Two sectors keep their
+closed forms, which the general code reproduces term for term, because they are
+faster and because the two-sector results in the draft were produced with them.
+The ``N in {2, 4, 6}`` system of section 3.2 runs through the general path.
+
+``lambda`` may be singular -- a sector the connected vertices leave alone is
+an ordinary thing to ask for -- and nothing inverts it; only its non-zero
+eigenvalues ever appear.
+
 Run ``python root_finding.py`` for the benchmark.
 """
 
 from __future__ import annotations
 
+import itertools
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
@@ -69,10 +84,73 @@ from quantisation_condition import QC, energy_grid, find_roots
 Array = NDArray[Any]
 
 EPS = np.finfo(float).eps
-# Offset from a pole at which the limit E -> p^{+-} is taken.  Small enough to
-# sit below any resolvable root shift, large enough that r / t and the product
-# of two such terms stay finite.
-T_EDGE = 1e-120
+
+
+def pole_edge(n_sectors: int) -> float:
+    """Offset from a pole at which the limit ``E -> p^{+-}`` is taken.
+
+    Small enough to sit below any resolvable root shift -- the smallest are the
+    ``lambda u^2 ~ 1e-10`` of the many-particle levels -- and large enough that
+    ``f`` stays finite there.  ``f`` is multilinear in the ``g_N``, so its
+    leading monomial is a product of ``n_sectors`` factors of order ``r / t``,
+    and ``t`` has to keep that product inside the double-precision range.  Two
+    sectors reproduce the ``1e-120`` used before this was made to depend on the
+    sector count.
+    """
+    return 10.0 ** -(240 // max(int(n_sectors), 1))
+
+
+# The two-sector value, kept as a module constant for callers that used it.
+T_EDGE = pole_edge(2)
+
+
+# ---------------------------------------------------------------------------
+# the determinant as a multilinear polynomial in the g's
+# ---------------------------------------------------------------------------
+
+
+def principal_minor(lam: Array, subset: Sequence[int]) -> float:
+    """``det lam[S, S]``, by the closed forms for the sizes that have them."""
+    if len(subset) == 0:
+        return 1.0
+    if len(subset) == 1:
+        return float(lam[subset[0], subset[0]])
+    if len(subset) == 2:
+        a, b = subset
+        return float(lam[a, a] * lam[b, b] - lam[a, b] ** 2)
+    return float(np.linalg.det(lam[np.ix_(subset, subset)]))
+
+
+def det_expansion(lam: Array) -> list[tuple[tuple[int, ...], float]]:
+    """``det[1 - diag(g) lam]`` as ``sum_S (-1)^|S| prod_{i in S} g_i det lam[S, S]``.
+
+    ``G`` is diagonal in the particle number (``gfunctions.GMatrix``), so the
+    condition is the determinant of an identity matrix plus a diagonal matrix
+    times a constant one, which is multilinear in the diagonal entries.  The
+    coefficients are principal minors of ``lambda`` and so depend only on the
+    couplings; they are built once per problem and contracted with the ``g``'s
+    at every evaluation.
+
+    Writing the determinant this way, rather than assembling ``1 - diag(g) lam``
+    and factorizing it, is what keeps ``f`` accurate next to a pole: there one
+    ``g_N`` is of order ``1 / pole_edge`` and the monomials containing it are
+    larger than the rest by that factor, so the sum has no cancellation to lose
+    digits to.  For one and two sectors the result is term for term the
+    hand-written formula this replaced.
+
+    Terms whose minor vanishes are dropped, which is what makes a rank-deficient
+    ``lambda`` -- say a sector that only couples through the disconnected
+    sub-processes -- cost nothing to evaluate.
+    """
+    n = lam.shape[0]
+    terms: list[tuple[tuple[int, ...], float]] = []
+    for size in range(n + 1):
+        for subset in itertools.combinations(range(n), size):
+            minor = principal_minor(lam, subset)
+            coefficient = minor if size % 2 == 0 else -minor
+            if coefficient != 0.0:
+                terms.append((subset, coefficient))
+    return terms
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +182,11 @@ class Secular:
 
     def __post_init__(self) -> None:
         n_sectors = self.lam.shape[0]
-        if n_sectors > 2:
-            raise NotImplementedError("only one or two sectors are supported")
+        self.n_sectors = n_sectors
+        self.t_edge = pole_edge(n_sectors)
         self.onehot = np.zeros((len(self.poles), n_sectors))
         self.onehot[np.arange(len(self.poles)), self.sector] = self.residues
+        self.terms = det_expansion(self.lam)
 
         values, vectors = np.linalg.eigh(self.lam)
         scale = max(np.max(np.abs(values)), 1e-300)
@@ -115,7 +194,7 @@ class Secular:
         self.rank = int(keep.sum())
         self.lam_values = values[keep]
         self.lam_vectors = vectors[:, keep]
-        if self.rank == 2:
+        if self.rank == 2 and n_sectors == 2:
             inverse = np.linalg.inv(self.lam)
             self.inv_det_sign = np.sign(np.linalg.det(inverse))
             self.inv_trace = np.trace(inverse)
@@ -219,23 +298,38 @@ class Secular:
             return value, -(inverse**2) @ self.onehot
 
     def f(self, anchor: Array, t: Array, derivative: bool = False) -> Any:
-        """``det[1 - G lambda]`` (and ``d/dE``) at ``E = anchor + t``."""
-        lam = self.lam
+        """``det[1 - G lambda]`` (and ``d/dE``) at ``E = anchor + t``.
+
+        Summed over the monomials of ``det_expansion``; the derivative of each
+        follows from the product rule.  Both are accumulated in the order the
+        expansion lists them, smallest subset first, which for one and two
+        sectors is term for term the formula this replaced.
+        """
         if derivative:
             g, dg = self.g(anchor, t, derivative=True)
         else:
             g = self.g(anchor, t)
-        if lam.shape[0] == 1:
-            value = 1.0 - g[:, 0] * lam[0, 0]
-            return (value, -dg[:, 0] * lam[0, 0]) if derivative else value
-        det = lam[0, 0] * lam[1, 1] - lam[0, 1] ** 2
-        g2, g4 = g[:, 0], g[:, 1]
-        value = 1.0 - g2 * lam[0, 0] - g4 * lam[1, 1] + g2 * g4 * det
-        if not derivative:
-            return value
-        d2, d4 = dg[:, 0], dg[:, 1]
-        slope = -d2 * lam[0, 0] - d4 * lam[1, 1] + (d2 * g4 + g2 * d4) * det
-        return value, slope
+
+        value = np.zeros(g.shape[0], dtype=float)
+        slope = np.zeros(g.shape[0], dtype=float)
+        for subset, coefficient in self.terms:
+            if not subset:
+                value = value + coefficient
+                continue
+            product = g[:, subset[0]]
+            for index in subset[1:]:
+                product = product * g[:, index]
+            value = value + coefficient * product
+            if not derivative:
+                continue
+            total = np.zeros(g.shape[0], dtype=float)
+            for position, index in enumerate(subset):
+                term = dg[:, index]
+                for other in subset[:position] + subset[position + 1 :]:
+                    term = term * g[:, other]
+                total = total + term
+            slope = slope + coefficient * total
+        return (value, slope) if derivative else value
 
     def count(self, anchor: Array, t: Array) -> Array:
         """``m(E) = n_-(Lambda^{-1} - Q^T G Q)``; its drop counts the roots."""
@@ -248,11 +342,71 @@ class Secular:
             q = self.lam_vectors[:, 0]
             value = 1.0 / self.lam_values[0] - g @ (q**2)
             return (value < 0).astype(int)
-        # Rank two: M = lambda^{-1} - diag(g).  det M = det(lambda^{-1}) f, which
-        # is evaluated without cancellation even when one g is huge.
-        det_sign = self.inv_det_sign * np.sign(self.f(anchor, t))
-        trace = self.inv_trace - g.sum(axis=1)
-        return np.where(det_sign < 0, 1, np.where(trace > 0, 0, 2))
+        if self.rank == 2 and self.n_sectors == 2:
+            # Rank two: M = lambda^{-1} - diag(g).  det M = det(lambda^{-1}) f,
+            # which is evaluated without cancellation even when one g is huge.
+            det_sign = self.inv_det_sign * np.sign(self.f(anchor, t))
+            trace = self.inv_trace - g.sum(axis=1)
+            return np.where(det_sign < 0, 1, np.where(trace > 0, 0, 2))
+        return self.inertia(g)
+
+    def inertia(self, g: Array) -> Array:
+        """``m = n_-(Lambda^{-1} - Q^T G Q)`` for any ``lambda`` and any sectors.
+
+        Taken on the bordered matrix
+
+            K = [[ -diag(1 / g), Q ], [ Q^T, -Lambda^{-1} ]] ,
+
+        whose Schur complement on the first block is
+        ``-(Lambda^{-1} - Q^T diag(g) Q)``.  Haynsworth additivity then gives
+
+            n_+(K) = #{ g_N < 0 } + m ,
+
+        which is the identity evaluated here.  Two things make this the form to
+        use rather than the small matrix itself.
+
+        A pole enters through ``1 / g_N``, not ``g_N``.  Right next to a pole of
+        sector ``N`` the entry is ``~1e-120`` instead of ``~1e120``, so nothing
+        has to be added to anything many decades larger and no term is lost as
+        the matrix is assembled.  Assembling ``Lambda^{-1} - Q^T diag(g) Q``
+        instead loses the ``Lambda^{-1}`` underneath a pole to rounding, and
+        then miscounts the roots next to about half of the poles -- which is
+        exactly where the count is needed, and is not recoverable afterwards by
+        any care in the eigenvalue routine.
+
+        And ``lambda`` is never inverted.  Only its non-zero eigenvalues appear,
+        so a singular ``lambda`` -- a sector that the connected vertices leave
+        alone, which is an ordinary thing to ask for -- needs no special case.
+
+        What is left is a congruence by the positive diagonal
+        ``diag(max_j |K_ij|)^{-1/2}``, which by Sylvester's law leaves the
+        inertia alone and puts the rows on one scale.  It is the row norm and
+        not the diagonal: a pole drives a *diagonal* entry of ``K`` to zero, and
+        scaling by that would blow its row up by ``1e60`` and lose the count
+        again.  Equilibrated this way an eigenvalue is only ambiguous in sign
+        when ``E`` is within rounding of a root, where the bracket has already
+        collapsed and either answer returns the same root.
+        """
+        size = self.n_sectors + self.rank
+        sectors = np.arange(self.n_sectors)
+        values = np.arange(self.rank)
+        # g = 0 exactly: the limit from either side gives the same count, since
+        # the sign flips in n_+(K) and in the #{g_N < 0} subtracted from it.
+        g = np.where(g == 0.0, np.finfo(float).tiny, g)
+
+        k = np.zeros((g.shape[0], size, size), dtype=float)
+        with np.errstate(all="ignore"):  # 1 / g underflows to zero at a pole
+            k[:, sectors, sectors] = -1.0 / g
+        k[:, : self.n_sectors, self.n_sectors :] = self.lam_vectors
+        k[:, self.n_sectors :, : self.n_sectors] = self.lam_vectors.T
+        k[:, self.n_sectors + values, self.n_sectors + values] = -1.0 / self.lam_values
+
+        norm = np.max(np.abs(k), axis=2)
+        scale = np.where(norm > 0.0, 1.0 / np.sqrt(norm), 1.0)
+        k = k * scale[:, :, None] * scale[:, None, :]
+        with np.errstate(all="ignore"):  # spurious matmul flags, see ``g``
+            spectrum = np.linalg.eigvalsh(k)
+        return ((spectrum > 0).sum(axis=1) - (g < 0).sum(axis=1)).astype(int)
 
 
 def _merge(p: Array, r: Array, tol: float) -> tuple[Array, Array, int]:
@@ -298,11 +452,17 @@ def isolate(problem: Secular, emin: float, emax: float, max_depth: int = 80) -> 
     return brackets
 
 
-def _point(E: float, left_pole: float | None, right_pole: float | None, side: int) -> tuple[float, float]:
+def _point(
+    E: float,
+    left_pole: float | None,
+    right_pole: float | None,
+    side: int,
+    edge: float,
+) -> tuple[float, float]:
     """``(anchor, t)`` for an interval end; ``side`` is +1 at the left end."""
     pole = left_pole if side > 0 else right_pole
     if pole is not None and E == pole:
-        return pole, side * T_EDGE
+        return pole, side * edge
     return E, 0.0
 
 
@@ -316,7 +476,11 @@ def _split(
     depth: int,
 ) -> None:
     """Bisect ``(a, b)`` with ``count`` until each piece holds a single root."""
-    ends = [_point(a, left_pole, right_pole, +1), _point(b, left_pole, right_pole, -1)]
+    edge = problem.t_edge
+    ends = [
+        _point(a, left_pole, right_pole, +1, edge),
+        _point(b, left_pole, right_pole, -1, edge),
+    ]
     m = problem.count(np.array([ends[0][0], ends[1][0]]), np.array([ends[0][1], ends[1][1]]))
     n_roots = int(m[0] - m[1])
     if n_roots < 0:
@@ -348,18 +512,19 @@ def _anchor(
     bracket is then written as offsets from the pole at that end, so that a
     root hugging the pole keeps all its significant digits.
     """
+    edge = problem.t_edge
     if n_roots > 1:  # unresolvable at double precision: a degenerate root
         return [Bracket(mid, 0.0, 0.0, np.inf)] * n_roots
     if left_pole is not None and right_pole is not None:
-        m = problem.count(np.array([mid, right_pole]), np.array([0.0, -T_EDGE]))
+        m = problem.count(np.array([mid, right_pole]), np.array([0.0, -edge]))
         in_left = m[0] == m[1]  # no root in (mid, b)
         if in_left:
-            return [Bracket(left_pole, T_EDGE, mid - left_pole, right_pole - left_pole)]
-        return [Bracket(right_pole, mid - right_pole, -T_EDGE, left_pole - right_pole)]
+            return [Bracket(left_pole, edge, mid - left_pole, right_pole - left_pole)]
+        return [Bracket(right_pole, mid - right_pole, -edge, left_pole - right_pole)]
     if left_pole is not None:
-        return [Bracket(left_pole, T_EDGE, b - left_pole, np.inf)]
+        return [Bracket(left_pole, edge, b - left_pole, np.inf)]
     if right_pole is not None:
-        return [Bracket(right_pole, a - right_pole, -T_EDGE, np.inf)]
+        return [Bracket(right_pole, a - right_pole, -edge, np.inf)]
     return [Bracket(a, 0.0, b - a, np.inf)]
 
 
@@ -537,6 +702,23 @@ def polish_mp(
     sector = problem.sector.tolist()
     lam = [[mpmath.mpf(float(x)) for x in row] for row in problem.lam]
     n_s = len(lam)
+    # The same expansion as ``Secular.f``, but with the minors of lambda taken
+    # at extended precision too, so that the reference is the exact solution of
+    # the double-precision pole data rather than of rounded coefficients.
+    terms = []
+    for size in range(n_s + 1):
+        for subset in itertools.combinations(range(n_s), size):
+            if size == 0:
+                minor = mpmath.mpf(1)
+            elif size == 1:
+                minor = lam[subset[0]][subset[0]]
+            else:
+                minor = mpmath.det(
+                    mpmath.matrix([[lam[i][j] for j in subset] for i in subset])
+                )
+            coefficient = minor if size % 2 == 0 else -minor
+            if coefficient != 0:
+                terms.append((subset, coefficient))
 
     out = []
     for anchor_value, offset in zip(anchors, offsets):
@@ -547,10 +729,13 @@ def polish_mp(
             g = [mpmath.mpf(0)] * n_s
             for p, r, s in zip(poles, residues, sector):
                 g[s] += r / ((anchor - p) + t)
-            if n_s == 1:
-                return 1 - g[0] * lam[0][0]
-            det = lam[0][0] * lam[1][1] - lam[0][1] ** 2
-            return 1 - g[0] * lam[0][0] - g[1] * lam[1][1] + g[0] * g[1] * det
+            total = mpmath.mpf(0)
+            for subset, coefficient in terms:
+                term = coefficient
+                for index in subset:
+                    term *= g[index]
+                total += term
+            return total
 
         def h(t: Any) -> Any:
             return t * f(t) if on_pole else f(t)
@@ -576,6 +761,8 @@ class Case:
     mLs: Array
     emin: float = 1.9
     emax: float = 6.0
+    sectors: tuple[int, ...] = (2, 4)
+    cutoff: float = 10.0
 
 
 def compare(
@@ -647,9 +834,11 @@ VARIANTS: dict[str, Callable[[QC, float, float], tuple[Array, Array]]] = {
 
 
 def run_case(
-    case: Case, tables: dict[int, Any], cutoff: float = 10.0, repeat: int = 3
+    case: Case, tables: dict[int, Any], cutoff: float | None = None, repeat: int = 3
 ) -> dict[str, dict[str, float]]:
-    print(f"\n== {case.name}: {case.couplings.label()}, mL in "
+    cutoff = case.cutoff if cutoff is None else cutoff
+    sectors = "".join(str(N) for N in case.sectors)
+    print(f"\n== {case.name}: N={sectors}, {case.couplings.label()}, mL in "
           f"[{case.mLs[0]:g}, {case.mLs[-1]:g}] ({len(case.mLs)} volumes)")
     totals = {name: {"missing": 0, "spurious": 0, "abs": 0.0, "rel": 0.0, "time": 0.0}
               for name in VARIANTS}
@@ -657,7 +846,14 @@ def run_case(
     build = 0.0
     for mL in case.mLs:
         start = time.perf_counter()
-        qc = QC(case.couplings, mL, cutoff=cutoff, mL_ref=float(case.mLs.max()), tables=tables)
+        qc = QC(
+            case.couplings,
+            mL,
+            sectors=case.sectors,
+            cutoff=cutoff,
+            mL_ref=float(case.mLs.max()),
+            tables=tables,
+        )
         build += time.perf_counter() - start
         problem = Secular.from_qc(qc)
         n_dropped += problem.n_dropped
@@ -713,6 +909,34 @@ def main() -> None:
     ]
     for case in cases:
         run_case(case, tables)
+
+    # The three-sector system of section 3.2.  Fewer and smaller volumes than
+    # above: the window reaches 8m rather than 6m and the six-particle levels
+    # are dense, so the mpmath reference -- which walks every pole in Python for
+    # every root -- is what sets the runtime, not the methods being measured.
+    six = {N: load_orbits(N, emax=11.0, mL=6.0, data_dir="data") for N in (2, 4, 6)}
+    mLs_six = np.linspace(4.0, 5.6, 9)
+    for case in [
+        Case(
+            "two-four-six, figure 3 couplings",
+            Couplings.two_four_six(20.0, 3.0e3, 1.0, l46=3.0e8, l66=1.0),
+            mLs_six,
+            emin=1.8,
+            emax=8.0,
+            sectors=(2, 4, 6),
+            cutoff=11.0,
+        ),
+        Case(
+            "two-four-six, six decoupled (singular lambda)",
+            Couplings.two_four_six(20.0, 3.0e3, 1.0),
+            mLs_six,
+            emin=1.8,
+            emax=8.0,
+            sectors=(2, 4, 6),
+            cutoff=11.0,
+        ),
+    ]:
+        run_case(case, six)
 
 
 if __name__ == "__main__":

@@ -315,11 +315,18 @@ def scan_filename(
     cutoff: Cutoff,
     data_dir: str | os.PathLike[str] = "data",
     method: str = "count",
+    sectors: Sequence[int] = SECTORS,
 ) -> Path:
-    """Stable cache path of a volume scan; ``method`` is the resolved root method."""
+    """Stable cache path of a volume scan; ``method`` is the resolved root method.
+
+    The sectors are part of the key: the same couplings over the same volumes
+    give a different spectrum once a sector is added, so a ``(2, 4)`` scan and a
+    ``(2, 4, 6)`` one must not share a file.
+    """
     mLs = np.asarray(mLs, dtype=float)
+    tag = "".join(str(int(N)) for N in sectors)
     stem = (
-        f"spectrum_{couplings.label()}"
+        f"spectrum_N{tag}_{couplings.label()}"
         f"_mL{mLs[0]:g}-{mLs[-1]:g}_NL{len(mLs)}"
         f"_E{emin:g}-{emax:g}_{cutoff.label()}_{method}"
     )
@@ -352,7 +359,9 @@ def scan_volumes(
     mLs = np.asarray(mLs, dtype=float)
     cutoff = Cutoff.parse(cutoff, shape, width)
     resolved = resolve_root_method(method)
-    path = scan_filename(couplings, mLs, emin, emax, cutoff, data_dir, resolved)
+    path = scan_filename(
+        couplings, mLs, emin, emax, cutoff, data_dir, resolved, sectors
+    )
     if load and path.exists():
         if verbose:
             print(f"[info] loading {path}")

@@ -40,7 +40,7 @@ plt.rcParams.update(plotparams)
 COLOURS: dict[int, str] = {2: "tab:red", 4: "tab:blue", 6: "tab:green"}
 
 
-def coupling_title(couplings: Couplings) -> str:
+def coupling_title(couplings: Couplings, per_line: int = 3) -> str:
     """The non-vanishing couplings, in the ``lambda_{N+N'}`` convention.
 
     Eq. (A.4) of the draft labels the vertices descending from the Lagrangian
@@ -70,7 +70,13 @@ def coupling_title(couplings: Couplings) -> str:
             else rf"\lambda_{{{high}\leftarrow{low}}}"
         )
         parts.append(rf"{label}={value:g}")
-    return ",\\; ".join(parts)
+    # Past a few couplings the list is wider than the narrow spectrum canvas,
+    # so it is broken into lines of at most ``per_line`` of them.
+    lines = [
+        ",\\; ".join(parts[start : start + per_line])
+        for start in range(0, len(parts), per_line)
+    ]
+    return "\n".join(f"${line}$" for line in lines)
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +180,26 @@ def spectrum_figure(
     emax: float = 6.0,
     filename: str | Path = "plots/spec_24.pdf",
     figsize: tuple[float, float] = SPECTRUM_FIG_SIZE,
+    title: str | None = None,
+    tracks: bool = True,
     open_pdf: bool = False,
 ) -> Path:
-    """Figure 1: the spectrum, against the free and ``V^d``-shifted levels."""
+    """Figure 1: the spectrum, against the free and ``V^d``-shifted levels.
+
+    ``title`` overrides the list of couplings, which past three or four of them
+    is wider than the canvas; ``coupling_title`` can wrap it instead.
+
+    ``tracks`` follows each level by continuity (``level_tracks``).  That is the
+    safe choice, but it is only needed where a level enters or leaves the window
+    somewhere other than the top: entering at the top adds a level above all the
+    others and leaves the rank of the rest alone, so there the rank *is* the
+    track and ``pad_levels`` gives the same curves for none of the work.  It
+    also gives better ones once the levels are dense, as in the ``N in
+    {2, 4, 6}`` window, where the spacing drops below the step a level takes
+    between volumes, the alignment can no longer tell which level continues into
+    which, and the curves it returns zigzag between neighbours.  Pass
+    ``tracks=False`` when the level count only ever grows from the top.
+    """
     mLs = np.asarray(result["mLs"], dtype=float)
     sectors = [int(N) for N in np.asarray(result["sectors"]).tolist()]
     couplings = result["couplings"]
@@ -190,10 +213,11 @@ def spectrum_figure(
             _draw(ax, mLs, pad_levels(result[f"shifted{N}"]), colour, alpha=0.75,
                   lw=0.7, linestyle=(0, (4, 2)),
                   label=rf"$N={N}$, $+\hat{{V}}^{{\sf d}}_L$")
-    _draw(ax, mLs, level_tracks(result["roots"]), "k", alpha=1.0, lw=1.0,
+    roots = level_tracks(result["roots"]) if tracks else pad_levels(result["roots"])
+    _draw(ax, mLs, roots, "k", alpha=1.0, lw=1.0,
           label=r"$\det[\mathcal{G}^{-1}-\lambda]=0$")
 
-    ax.set_title(f"${coupling_title(couplings)}$", size=8)
+    ax.set_title(coupling_title(couplings) if title is None else title, size=8)
     ax.set_xlabel(r"$mL$", size=12)
     ax.set_ylabel(r"$E/m$", size=12)
     ax.set_xlim([mLs[0], mLs[-1]])
@@ -268,7 +292,7 @@ def content_figure(
     )
     bar.set_label("four-particle content", size=9)
 
-    ax.set_title(f"${coupling_title(couplings)}$", size=8)
+    ax.set_title(coupling_title(couplings), size=8)
     ax.set_xlabel(r"$mL$", size=12)
     ax.set_ylabel(r"$E/m$", size=12)
     ax.set_xlim([mLs[0], mLs[-1]])

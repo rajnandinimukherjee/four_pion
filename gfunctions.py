@@ -78,6 +78,41 @@ class Couplings:
         return cls({(2, 2): l22, (2, 4): l24, (4, 4): l44, (3, 3): l33})
 
     @classmethod
+    def two_four_six(
+        cls,
+        l22: float,
+        l24: float,
+        l44: float,
+        l26: float = 0.0,
+        l46: float = 0.0,
+        l66: float = 0.0,
+        l33: float = 0.0,
+        l55: float = 0.0,
+    ) -> "Couplings":
+        """The couplings of section 3.2: two, four and six identical scalars.
+
+        The six fully connected vertices allowed in the window by the
+        ``phi -> -phi`` symmetry, plus the odd ``r -> r`` sub-processes that only
+        ever appear disconnected.  ``l33`` needs at least one spectator and so
+        first acts in the four-particle sector, ``l55`` in the six-particle one;
+        ``l22`` and ``l44`` each play both roles, connected in their own sector
+        and disconnected in the larger ones, which is why one object carries
+        them all.
+        """
+        return cls(
+            {
+                (2, 2): l22,
+                (2, 4): l24,
+                (2, 6): l26,
+                (4, 4): l44,
+                (4, 6): l46,
+                (6, 6): l66,
+                (3, 3): l33,
+                (5, 5): l55,
+            }
+        )
+
+    @classmethod
     def parse(cls, values: Sequence[str | float]) -> "Couplings":
         """Build from the command-line triple/quadruple ``l22 l24 l44 [l33]``."""
         numbers = [float(value) for value in values]
@@ -335,18 +370,34 @@ class GFunction:
         volume = self.mL ** (3 * (r_values - 1))
         values = weights / (volume * big_omega_s)
 
-        for row_out, row_in, r, value in zip(
-            rows_out.tolist(), rows_in.tolist(), r_values.tolist(), values.tolist()
-        ):
-            level = int(level_of_orbit[row_in])
-            assert level == int(level_of_orbit[row_out]), (
+        levels_in = level_of_orbit[rows_in]
+        if not np.array_equal(level_of_orbit[rows_out], levels_in):
+            raise AssertionError(
                 "a disconnected contribution left its degenerate level"
             )
+
+        # One block per (level, r), so the contributions are scattered a block
+        # at a time rather than one at a time: at the cutoffs this sector needs
+        # there are millions of contributions but only a few hundred blocks, and
+        # the per-contribution Python loop this replaces dominated the cost of
+        # building G.  Sorting by the block they belong to makes each block one
+        # contiguous run, which ``bincount`` then sums in a single pass.
+        keys = levels_in * (self.N + 1) + r_values
+        order = np.argsort(keys, kind="stable")
+        boundaries = np.flatnonzero(np.diff(keys[order])) + 1
+        slots_out = slot_of_orbit[rows_out]
+        slots_in = slot_of_orbit[rows_in]
+
+        for chunk in np.split(order, boundaries):
+            level = int(levels_in[chunk[0]])
             size = len(self.level_members[level])
             block = self.level_blocks[level].setdefault(
-                int(r), np.zeros((size, size), dtype=float)
+                int(r_values[chunk[0]]), np.zeros((size, size), dtype=float)
             )
-            block[int(slot_of_orbit[row_out]), int(slot_of_orbit[row_in])] += value
+            flat = slots_out[chunk] * size + slots_in[chunk]
+            block += np.bincount(
+                flat, weights=values[chunk], minlength=size * size
+            ).reshape(size, size)
 
     # -- couplings ----------------------------------------------------------
 
