@@ -1,71 +1,174 @@
-import pdb
+"""Finite-volume levels by direct diagonalization, as a check on the roots.
+
+At leading order the quantization condition is equivalent to diagonalizing the
+truncated Hamiltonian in the ``A_1^+`` orbit basis,
+
+    H_{mu' mu} = E_mu delta_{mu' mu} + V^d_{mu' mu} + u_mu' lambda_{N'N} u_mu ,
+
+with the same ingredients that build ``G``: the non-interacting energies, the
+disconnected blocks inside each degenerate level, and the rank-one connected
+vertex of eq. (2.11).  The matrix determinant lemma turns ``det[E - H] = 0``
+into
+
+    det[E - H^(0) - V^d] det[1 - G(E, L) lambda] = 0 ,
+
+so the eigenvalues of ``H`` away from the levels of ``Ghat`` are exactly the
+solutions of ``det[G^{-1} - lambda] = 0``.  Comparing the two is therefore a
+check of the root search, and the eigenvectors give the same sector content as
+``QC.content`` without any root finding.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 from tqdm import tqdm
+
+from gfunctions import Couplings
+from quantisation_condition import QC, SECTORS, pad_levels
 from utils import call_PDF
 
-from quantisation_condition import QC, B
+Array = NDArray[Any]
 
 
-def plotLevels(Ls, I_levels, NI2_levels, NI4_levels,
-               Emin=1.98, Emax=6.0, figsize=(3, 6), N=6,
-               filename=None, **kwargs):
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.set_ylabel(r"$E_{FV}/m_\pi$", size=16)
-    ax.set_xlabel(r"$m_\pi L$", size=16)
-    for lvl in range(NI2_levels.shape[1]):
-        ax.plot(Ls, NI2_levels[:, lvl], "r-", alpha=0.5, lw=0.8)
-    for lvl in range(NI4_levels.shape[1]):
-        ax.plot(Ls, NI4_levels[:, lvl], "b-", alpha=0.5, lw=0.8)
-    for lvl in range(I_levels.shape[1]):
-        ax.plot(Ls, I_levels[:, lvl], "k-", lw=0.8)
-    ax.set_ylim([Emin, Emax])
-    ax.set_xlim([Ls[0], Ls[-1]])
-    filename = filename or f"plots/EFV_N{N}_analytic.pdf"
-    call_PDF(filename)
+def hamiltonian(qc: QC) -> tuple[Array, Array]:
+    """Build ``H`` in the orbit basis, and the sector label of each orbit."""
+    sectors = qc.sectors
+    functions = [qc.G.sectors[N] for N in sectors]
+    sizes = [len(function.u) for function in functions]
+    offsets = np.cumsum([0] + sizes)
+    total = int(offsets[-1])
+
+    matrix = np.zeros((total, total), dtype=float)
+    labels = np.zeros(total, dtype=int)
+
+    for position, (N, function) in enumerate(zip(sectors, functions)):
+        start = offsets[position]
+        labels[start : offsets[position + 1]] = N
+        index = np.arange(start, offsets[position + 1])
+        matrix[index, index] = function.energies
+
+        for level, members in enumerate(function.level_members):
+            blocks = function.level_blocks[level]
+            if not blocks:
+                continue
+            potential = sum(
+                qc.couplings[(r, r)] * block for r, block in blocks.items()
+            )
+            rows = start + members
+            matrix[np.ix_(rows, rows)] += 0.5 * (potential + potential.T)
+
+    for row, (N_out, out) in enumerate(zip(sectors, functions)):
+        for column, (N_in, inside) in enumerate(zip(sectors, functions)):
+            coupling = qc.couplings[(N_out, N_in)]
+            if coupling == 0.0:
+                continue
+            block = coupling * np.outer(out.u, inside.u)
+            matrix[
+                offsets[row] : offsets[row + 1], offsets[column] : offsets[column + 1]
+            ] += block
+
+    return matrix, labels
 
 
-def energies_to_levels(energies, N_L):
-    max_len = max(len(lst) for lst in energies)
-    levels = np.full((N_L, max_len), np.nan, dtype=float)
-    for i, lst in enumerate(energies):
-        new_list = np.array(lst)
-        levels[i, :len(new_list)] = new_list
-    return levels
+def levels(qc: QC, emin: float, emax: float) -> tuple[Array, Array]:
+    """Eigenvalues of ``H`` in a window, with the four-particle content of each."""
+    matrix, labels = hamiltonian(qc)
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    inside = (eigenvalues > emin) & (eigenvalues < emax)
+    weights = eigenvectors[:, inside] ** 2
+    content = np.array(
+        [weights[labels == N].sum(axis=0) for N in qc.sectors], dtype=float
+    )
+    return eigenvalues[inside], content.T
 
 
-def solve_FV_energies(gs, L, N=6, Emin=1.9, Emax=6.0, cutoff="hard", **kwargs):
-    g22, g24, g44 = gs
-    qc = QC(B(gs), N, L, cutoff=cutoff, Emin=Emin,
-            Emax=Emax, shift=True)
-    NI2, NI4 = qc.FVE2, qc.FVE4
-    C2 = (qc.I2.coeffs/(1-g22*qc.I2.remainders()))[:len(NI2)]
-    C4 = qc.I4.coeffs[:len(NI4)]/(1-g44*qc.I4.remainders(max_idx=len(NI4)))
-    I2 = NI2 + g22*C2
-    I4 = NI4 + g44*C4
-    V = g24*np.outer(C2, C4)**0.5
-    H = np.block([[np.diag(I2), V], [V.T, np.diag(I4)]])
-    evals, evecs = np.linalg.eigh(H)
-    return evals, NI2, NI4
+def scan_volumes(
+    mLs: ArrayLike,
+    couplings: Couplings,
+    emin: float = 1.9,
+    emax: float = 6.0,
+    cutoff: float = 10.0,
+    sectors: Sequence[int] = SECTORS,
+    alpha: float = 0.0,
+    data_dir: str = "data",
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Diagonalize at every volume of a scan."""
+    mLs = np.asarray(mLs, dtype=float)
+    per_volume: list[Array] = []
+    contents: list[Array] = []
+    tables = None
+
+    volumes = tqdm(mLs, desc="mL", leave=False) if verbose else mLs
+    for mL in volumes:
+        qc = QC(
+            couplings,
+            mL,
+            sectors=sectors,
+            cutoff=cutoff,
+            mL_ref=float(mLs.max()),
+            alpha=alpha,
+            data_dir=data_dir,
+            tables=tables,
+        )
+        tables = qc.tables
+        energies, content = levels(qc, emin, emax)
+        per_volume.append(energies)
+        contents.append(content)
+
+    return {
+        "mLs": mLs,
+        "levels": per_volume,
+        "content": contents,
+        "sectors": np.array(sectors),
+        "couplings": couplings,
+        "emin": emin,
+        "emax": emax,
+    }
 
 
-def levels_Lrange(gs, Ls, **kwargs):
-    I_energies, NI2_energies, NI4_energies = [], [], []
-    for L in tqdm(list(Ls), desc="L", leave=False):
-        I, NI2, NI4 = solve_FV_energies(gs, L, **kwargs)
-        I_energies.append(list(I))
-        NI2_energies.append(NI2)
-        NI4_energies.append(NI4)
+def plot_levels(
+    result: dict[str, Any],
+    filename: str = "plots/levels_diagonalised.pdf",
+    figsize: tuple[float, float] = (3.2, 6.0),
+    open_pdf: bool = True,
+) -> None:
+    """Plot the diagonalized levels, coloured by their four-particle content."""
+    mLs = np.asarray(result["mLs"], dtype=float)
+    energies = pad_levels(result["levels"])
+    content = pad_levels([row[:, -1] for row in result["content"]])
 
-    NI2_levels = energies_to_levels(NI2_energies, len(Ls))
-    NI4_levels = energies_to_levels(NI4_energies, len(Ls))
-    I_levels = energies_to_levels(I_energies, len(Ls))
-    plotLevels(Ls, I_levels, NI2_levels, NI4_levels, **kwargs)
+    _, ax = plt.subplots(1, 1, figsize=figsize)
+    for column in range(energies.shape[1]):
+        ax.plot(mLs, energies[:, column], "k-", lw=0.6, alpha=0.4)
+    scatter = ax.scatter(
+        np.repeat(mLs[:, None], energies.shape[1], axis=1),
+        energies,
+        c=content,
+        s=3,
+        cmap="coolwarm",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    plt.colorbar(scatter, ax=ax, label="four-particle content")
+
+    ax.set_xlabel(r"$mL$", size=12)
+    ax.set_ylabel(r"$E/m$", size=12)
+    ax.set_xlim([mLs[0], mLs[-1]])
+    ax.set_ylim([result["emin"], result["emax"]])
+    call_PDF(filename, open=open_pdf)
+
+
+def main() -> None:
+    mLs = np.linspace(4.0, 7.0, 31)
+    couplings = Couplings.two_four(l22=20.0, l24=5000.0, l44=1.0, l33=0.0)
+    result = scan_volumes(mLs, couplings, emin=1.9, emax=6.0, cutoff=10.0)
+    plot_levels(result, open_pdf=False)
 
 
 if __name__ == "__main__":
-    # gs = [2.0, (48**0.5)*1e+3, 24*5e+4]
-    gs = [2.0, 0.0, 24*5e+4]
-    Ls = np.linspace(4, 7, 31)
-    levels_Lrange(gs, Ls)
+    main()

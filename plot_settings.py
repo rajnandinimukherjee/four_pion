@@ -1,21 +1,28 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Set some plot parameters
+"""Shared Matplotlib settings for the analysis figures."""
 
-Created on Mon Aug 16 20:41:27 2021
+from __future__ import annotations
 
-@author: jflynn
-"""
 from math import sqrt
+from typing import Any
 
-fig_width_pt = 455.24411  # Got this from LaTeX using \showthe\columnwidth
-inches_per_pt = 1.0 / 72.27  # Convert pt to inch
-golden_mean = (sqrt(5) + 1.0) / 2.0  # Aesthetic ratio
-fig_width = fig_width_pt * inches_per_pt  # width in inches
-fig_height = fig_width / golden_mean  # height in inches
-fig_size = [fig_width, fig_height]
-plotparams = {
+
+FIG_WIDTH_PT: float = 455.24411  # LaTeX column width, from ``\showthe\columnwidth``.
+INCHES_PER_PT: float = 1.0 / 72.27
+GOLDEN_MEAN: float = (sqrt(5.0) + 1.0) / 2.0
+FIG_WIDTH: float = FIG_WIDTH_PT * INCHES_PER_PT
+FIG_HEIGHT: float = FIG_WIDTH / GOLDEN_MEAN
+FIG_SIZE: list[float] = [FIG_WIDTH, FIG_HEIGHT]
+
+# Original names remain available to notebooks that imported them directly.
+fig_width_pt: float = FIG_WIDTH_PT
+inches_per_pt: float = INCHES_PER_PT
+golden_mean: float = GOLDEN_MEAN
+fig_width: float = FIG_WIDTH
+fig_height: float = FIG_HEIGHT
+fig_size: list[float] = FIG_SIZE
+
+# Keep the historical lowercase name used throughout the analysis scripts.
+plotparams: dict[str, Any] = {
     "backend": "ps",
     "font.size": 10,
     "font.family": "STIXGeneral",
@@ -23,7 +30,7 @@ plotparams = {
     "xtick.labelsize": 10,
     "ytick.labelsize": 10,
     "axes.labelsize": 10,
-    "figure.figsize": fig_size,
+    "figure.figsize": FIG_SIZE,
     "savefig.bbox": "tight",
     "legend.numpoints": 1,
     "legend.frameon": True,

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "four-pion-analysis"
+version = "0.1.0"
+description = "Finite-volume four-pion scattering analysis tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "tqdm",
+]
+
+[project.scripts]
+four-pion-analysis = "four_pion_cli:main"
+
+[tool.setuptools]
+py-modules = [
+    "analytic_roots",
+    "checks",
+    "figures",
+    "four_pion_cli",
+    "gfunctions",
+    "orbits",
+    "plot_settings",
+    "quantisation_condition",
+    "utils",
+]
