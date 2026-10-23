@@ -439,13 +439,21 @@ def main(
     """Draw both figures of section 3.1.
 
     The default couplings are chosen so that the figures show something.  Only
-    ``lambda_6`` has any real range: in the resummed condition a level cannot be
-    pushed past the neighbouring zero of ``G``, so ``lambda_4`` and
-    ``lambda_8`` saturate -- ``lambda_8`` moves the four-particle threshold by
-    at most ``+6%`` at ``mL = 4`` however large it is, and beyond about ``1e6``
-    it also drives the content to pure 0 or 1 and closes the avoided crossings.
-    ``lambda_4`` is kept small so that the two-particle ground state stays near
-    ``2m``; ``lambda_6`` then sets both the level shifts and the crossings.
+    ``lambda_6`` has any real range, because the shifts are bounded: between
+    consecutive poles of ``G`` there are at most ``rank(lambda)`` roots, and as
+    a coupling grows the roots move onto the zeros of the corresponding entry
+    of ``G``, so no level can be pushed past the next pole.  A coupling
+    therefore stops doing anything once ``lambda u^2`` reaches the pole
+    spacing, which is also where the linear threshold expansions of section 3.1
+    stop describing the levels.
+
+    In practice ``lambda_4`` and ``lambda_8`` saturate: ``lambda_8`` moves the
+    four-particle threshold by at most ``+6%`` at ``mL = 4`` however large it
+    is (``1e8`` and ``1e10`` give the same spectrum to four decimals), and
+    beyond about ``1e6`` it also drives the content to pure 0 or 1 and closes
+    the avoided crossings.  ``lambda_4`` is kept small so that the two-particle
+    ground state stays near ``2m``; ``lambda_6`` then sets both the level
+    shifts and the crossings.
 
     At these values the levels sit 10-14% from their non-interacting positions
     at ``mL = 4`` and 3-7% at ``mL = 7``, the two-particle ground state stays
