@@ -28,5 +28,6 @@ py-modules = [
     "orbits",
     "plot_settings",
     "quantisation_condition",
+    "root_finding",
     "utils",
 ]
