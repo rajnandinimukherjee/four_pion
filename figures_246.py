@@ -306,6 +306,15 @@ def main(
         emax=emax,
         filename=filename,
         title=coupling_title(couplings),
+        # The key has six entries here rather than four, and this window runs
+        # to 8m, so the gap above the ground state is a smaller fraction of the
+        # axis than in the two-and-four-particle figure.  Measured against the
+        # drawn curves that gap is 1.27 in E/m between the ground state at 2.03
+        # and the lowest level above it at 3.30, against 1.22 for a six-entry
+        # key at the shared label size; the box is therefore dropped to the
+        # ground state and set a point smaller, which clears both by 0.1.
+        legend_anchor=(0.015, 0.045),
+        legend_size=8.0,
         # Levels only ever come into this window over the top -- 13 of them at
         # ``mL = 3.8`` and 77 at ``mL = 6``, and the ground state stays well
         # above ``emin`` -- so the rank from the bottom is stable and is the
