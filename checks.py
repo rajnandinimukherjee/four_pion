@@ -232,6 +232,61 @@ def check_root_counting(mL: float = 5.5, cutoff: float = 8.0) -> None:
     report("weak couplings, number of roots", float(len(roots)), float(len(reference)), tol=0.5)
 
 
+def check_eigen_content(mL: float = 5.5, cutoff: float = 8.0) -> None:
+    """The eigenvalue method for the particle-number content.
+
+    The content of section 2.3 is computed as the squared components of the
+    null eigenvector of the symmetric matrix ``X = D^{-1}[G - lambda^{-1}]
+    D^{-1}``, the eigenvalue method of Hansen and Sharpe, arXiv:1204.0826,
+    eqs. (115)-(116).  Checked here against the earlier singular-vector route,
+    against the sum rule, and in the limits in which the answer is known.
+    """
+    print("particle-number content (eigenvalue method)")
+    qc = QC(Couplings.two_four(l22=20.0, l24=5000.0, l44=1.0), mL, cutoff=cutoff)
+    emin, emax = 2.5, 5.5
+    roots = qc.roots(emin, emax)
+
+    worst_svd = 0.0
+    worst_sum = 0.0
+    worst_residual = 0.0
+    worst_amplitude = 0.0
+    worst_range = 0.0
+    for energy in roots:
+        state = qc.eigen_state(float(energy))
+        content = state.content
+        worst_svd = max(worst_svd, float(np.max(np.abs(content - qc.content_svd(float(energy))))))
+        worst_sum = max(worst_sum, abs(float(content.sum()) - 1.0))
+        worst_residual = max(worst_residual, abs(state.eigenvalue) / max(state.spread, 1e-300))
+        # X c = 0 at a solution, with c the null eigenvector
+        residual = qc.eigen_matrix(float(energy)) @ state.amplitudes
+        worst_amplitude = max(worst_amplitude, float(np.max(np.abs(residual))))
+        worst_range = max(worst_range, float(np.max(np.maximum(content - 1.0, -content))))
+
+    report("eigenvalue vs singular-vector content", worst_svd, 0.0, tol=1e-9)
+    report("content sums to one", worst_sum, 0.0, tol=1e-12)
+    report("null eigenvalue at the roots", worst_residual, 0.0, tol=1e-10)
+    report("X c = 0 at the roots", worst_amplitude, 0.0, tol=1e-9)
+    report("content within [0, 1]", worst_range, 0.0, tol=1e-12)
+
+    # Diagonal couplings do not mix the sectors, so every state is pure.
+    qc.set_couplings(Couplings.two_four(l22=20.0, l24=0.0, l44=1.0))
+    impurity = 0.0
+    for energy in qc.roots(emin, emax):
+        content = qc.eigen_state(float(energy)).content
+        impurity = max(impurity, float(np.min(np.abs(np.sort(content) - np.array([0.0, 1.0])))))
+    report("unmixed sectors give a pure content", impurity, 0.0, tol=1e-8)
+
+    # w = D^{-1} c must span the kernel of 1 - lambda G, up to sign and scale.
+    qc.set_couplings(Couplings.two_four(l22=20.0, l24=5000.0, l44=1.0))
+    worst_kernel = 0.0
+    for energy in qc.roots(emin, emax):
+        state = qc.eigen_state(float(energy))
+        kernel = (np.eye(len(qc.sectors)) - qc.lam @ qc.G(float(energy))) @ state.weights
+        worst_kernel = max(worst_kernel, float(np.max(np.abs(kernel))) / float(
+            np.linalg.norm(qc.lam @ qc.G(float(energy)))))
+    report("(1 - lambda G) w = 0 for the rescaled vector", worst_kernel, 0.0, tol=1e-9)
+
+
 def main() -> int:
     checks: list[Callable[[], None]] = [
         check_g22,
@@ -241,6 +296,7 @@ def main() -> int:
         check_cutoff_shapes,
         check_against_diagonalisation,
         check_root_counting,
+        check_eigen_content,
     ]
     for check in checks:
         check()

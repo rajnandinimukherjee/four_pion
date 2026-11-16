@@ -91,7 +91,14 @@ def content_figure(
     """Figure 2: the four-particle content of each finite-volume state.
 
     The content is recomputed from the saved roots, since it needs ``G`` itself
-    and not only the energies.
+    and not only the energies.  It is obtained by the eigenvalue method of
+    Hansen and Sharpe, arXiv:1204.0826 section V: at each solution the
+    symmetric matrix ``X(E) = D^{-1}[G - lambda^{-1}] D^{-1}`` of
+    ``QC.eigen_matrix`` is diagonalized, and the squared components of its null
+    eigenvector are the particle-number content, their eqs. (115)-(116).  The
+    eigenvalue of that branch is a residual on the root, and the gap to the
+    next eigenvalue certifies that the zero is simple; a solution that fails
+    that test is left blank rather than assigned a content.
     """
     mLs = np.asarray(result["mLs"], dtype=float)
     couplings = couplings or result["couplings"]
@@ -99,6 +106,7 @@ def content_figure(
 
     energies = pad_levels(result["roots"])
     content = np.full_like(energies, np.nan)
+    degenerate = 0
 
     tables = None
     for index, mL in enumerate(mLs):
@@ -115,7 +123,11 @@ def content_figure(
         for column, energy in enumerate(energies[index]):
             if np.isnan(energy):
                 continue
-            content[index, column] = qc.content(float(energy))[-1]
+            state = qc.eigen_state(float(energy))
+            if not state.is_simple():
+                degenerate += 1
+                continue
+            content[index, column] = state.content[-1]
 
     _, ax = plt.subplots(1, 1, figsize=figsize)
     for column in range(energies.shape[1]):
@@ -131,7 +143,9 @@ def content_figure(
         zorder=2,
     )
     bar = plt.colorbar(scatter, ax=ax, pad=0.02)
-    bar.set_label("four-particle content", size=9)
+    bar.set_label(r"four-particle content $P_4$", size=9)
+    if degenerate:
+        print(f"[warn] {degenerate} solutions with a non-simple zero, left blank")
 
     ax.set_title(f"${coupling_title(couplings)}$", size=8)
     ax.set_xlabel(r"$mL$", size=12)
