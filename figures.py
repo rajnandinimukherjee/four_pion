@@ -190,17 +190,19 @@ def main(
     mLs: ArrayLike | None = None,
     couplings: Couplings | None = None,
     cutoff: Any = 10.0,
-    emin: float = 1.9,
+    emin: float = 1.5,
     emax: float = 6.0,
     open_pdf: bool = False,
 ) -> None:
     mLs = np.linspace(4.0, 7.0, 61) if mLs is None else np.asarray(mLs, dtype=float)
     couplings = couplings or Couplings.two_four(
-        l22=20.0, l24=5000.0, l44=1.0, l33=0.0
+        l22=20.0, l24=15000.0, l44=1.0, l33=0.0
     )
     result = scan_volumes(mLs, couplings, emin=emin, emax=emax, cutoff=cutoff)
-    print(f"[info] {spectrum_figure(result, open_pdf=open_pdf)}")
-    print(f"[info] {content_figure(result, open_pdf=open_pdf)}")
+    # The mixing is strong enough here to push the lowest level below 2m at
+    # small volumes, so the window is opened below threshold to keep it in view.
+    print(f"[info] {spectrum_figure(result, emin=emin, open_pdf=open_pdf)}")
+    print(f"[info] {content_figure(result, emin=emin, open_pdf=open_pdf)}")
 
 
 if __name__ == "__main__":
