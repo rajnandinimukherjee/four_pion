@@ -33,11 +33,11 @@ Energies are in units of the mass and momenta are integer vectors `n` with
 | --- | --- |
 | `orbits.py` | **standalone generator.** Enumerates `B_N(0)`, partitions it into `O_h` orbits, stores `d_mu`, `N_mu`, the degenerate levels, and the volume-independent part of `<b_mu'\|V^d_L\|b_mu>` (eq. A.49). Everything in the file is independent of `L` and of the couplings. |
 | `gfunctions.py` | Turns an orbit table into `G_{NN}(E, L)`: the vertex factors `u_mu`, the `V^d` block of each level, its diagonalization into poles and residues, and the matrix `G` in the space of particle numbers. Also defines `Couplings` and `Cutoff`, the regulator on the sums. |
-| `quantisation_condition.py` | **analysis script.** Solves `det[G^{-1} - lambda] = 0` at one volume or over an `mL` scan, gives the particle-number content of each state, caches scans and plots them. |
+| `quantisation_condition.py` | **analysis script.** Solves `det[G^{-1} - lambda] = 0` at one volume or over an `mL` scan, gives the particle-number content of each state by the eigenvalue method (`QC.eigen_state`), caches scans and plots them. |
 | `root_finding.py` | The default root search for `alpha = 0`: exact root counting between the poles of `G`, then Newton relative to the nearest pole. `python root_finding.py` benchmarks it against the grid search and dense diagonalization. |
 | `figures.py` | The two figures of section 3.1: the spectrum, and the four-particle content of each level. |
 | `analytic_roots.py` | The same levels by diagonalizing the truncated Hamiltonian `H = H0 + V^d + \|u> lambda <u\|`, which the matrix determinant lemma says must agree with the roots. |
-| `checks.py` | Analytic checks: the orbit sum rule, `G_22` against the direct momentum sum, the threshold expansions of section 3.1, the symmetry of `V^d`, the roots against diagonalization, and root counting at weak couplings. |
+| `checks.py` | Analytic checks: the orbit sum rule, `G_22` against the direct momentum sum, the threshold expansions of section 3.1, the symmetry of `V^d`, the roots against diagonalization, root counting at weak couplings, and the eigenvalue method for the particle-number content. |
 
 ## Workflow
 
@@ -78,6 +78,50 @@ four-pion-analysis check
 `--couplings` takes `lambda_{2<-2} lambda_{2<-4} lambda_{4<-4}` and optionally
 `lambda_{3<-3}`, which drives the disconnected three-particle sub-process inside
 `G_44`.
+
+## Particle-number content
+
+The weight of each particle-number sector in a finite-volume state is computed
+by the **eigenvalue method** of Hansen and Sharpe, arXiv:1204.0826 section V,
+whose eqs. (115)-(116) read the relative size of the open channels off the
+eigenvector of the quantization-condition matrix with vanishing eigenvalue.
+
+Their matrix `X = F^{-1} + i M` factorizes as `X = P^{-1} Y P^{-1}`, with `Y`
+free of the kinematic normalization and `P` the phase-space matrix.  The
+content is carried by `X`, not by `Y`: the eigenvector of the *normalized*
+matrix is the vector of channel amplitudes.  The same split here is
+
+```
+Y(E) = G(E, L) - lambda^{-1} ,        kernel  w
+D    = diag( sqrt(-dG_NN/dE) ) ,      the norms of Ghat |u_N>
+X(E) = D^{-1} Y(E) D^{-1} ,           kernel  c = D w
+```
+
+so `D` plays the role of `P`.  `QC.eigen_state(E)` diagonalizes `X` with
+`numpy.linalg.eigh`, picks the branch of smallest `|eigenvalue|` and returns an
+`EigenState`; `state.content` is `c_N^2`, the probability of finding `N`
+particles, and `state.ratio` is `c_4 / c_2`, the analogue of their `c_K / c_pi`.
+
+Three things come for free with this form and are why it replaced the earlier
+singular-vector route (still available as `QC.content(E, method="svd")`, and
+cross-checked against it in `checks.py`):
+
+* `X` is **real symmetric**, so `eigh` gives real eigenvalues and an orthonormal
+  eigenbasis, and the content needs no rescaling after the fact — the kinematic
+  factors are already inside the matrix.
+* `X` is **bounded at the poles of `G`**: there `G_NN ~ r/(E-E_p)` while
+  `D_N ~ sqrt(r)/|E-E_p|`, so the division by `D` cancels the pole, whereas
+  `1 - lambda G` diverges.  That is exactly where the content matters most,
+  since a solution next to an `N`-particle level has `P_N -> 1`.
+* The **eigenvalue itself is a diagnostic**: it vanishes at a solution, so its
+  size is a residual on the root, and the gap to the next eigenvalue certifies
+  that the zero is simple.  A non-simple zero means the residue of the
+  resolvent is not rank one and the content is not given by a single vector;
+  `EigenState.is_simple` tests for it and `figures.py` leaves such points blank.
+
+The method needs `lambda` to be invertible, which is the generic case and is
+checked at run time; a singular `lambda` has a direction that decouples from
+`G` and leaves the content undefined in that direction.
 
 ## Conventions and caveats
 

@@ -37,6 +37,7 @@ Usage
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -71,6 +72,79 @@ def resolve_root_method(method: str) -> str:
     if method not in ROOT_METHODS:
         raise ValueError(f"unknown root method {method!r}; use one of {ROOT_METHODS}")
     return "count" if method == "auto" else method
+
+
+@dataclass(frozen=True)
+class EigenState:
+    """The null branch of the quantization condition at one energy.
+
+    The eigenvalue method of Hansen and Sharpe, arXiv:1204.0826 section V,
+    reads the channel content of a finite-volume state off the eigenvector of
+    the quantization-condition matrix with vanishing eigenvalue, their
+    eqs. (115)-(116).  This holds the result of that diagonalization for the
+    particle-number sectors of section 2.3 of the draft.
+
+    Attributes
+    ----------
+    energy:
+        The energy at which the matrix was diagonalized; a solution of the
+        quantization condition if ``eigenvalue`` is zero to working accuracy.
+    sectors:
+        The particle numbers, in the order of the components below.
+    amplitudes:
+        The unit-normalized null eigenvector ``c``, i.e. the amplitudes of the
+        state in an orthonormal basis of sector states, ``c_N = w_N
+        sqrt(-dG_NN/dE)``.  Its squares are the particle-number content.
+    weights:
+        The same vector divided by the sector norms and renormalized: the
+        kernel vector ``w`` of ``1 - lambda G``, as returned by ``null_vector``
+        up to sign and scale.
+    eigenvalue:
+        The eigenvalue of the null branch.  It vanishes exactly at a solution,
+        so its size is a residual: how far ``energy`` is from a root.
+    gap:
+        The magnitude of the next eigenvalue.  A simple zero has ``gap`` of
+        order ``spread``; ``gap`` comparable to ``eigenvalue`` signals a
+        degenerate solution, where the content is not given by one vector.
+    spread:
+        The largest eigenvalue in magnitude, the scale against which
+        ``eigenvalue`` and ``gap`` are to be read.
+    """
+
+    energy: float
+    sectors: tuple[int, ...]
+    amplitudes: Array
+    weights: Array
+    eigenvalue: float
+    gap: float
+    spread: float
+
+    @property
+    def content(self) -> Array:
+        """``P_N = c_N^2``, the particle-number content, summing to one."""
+        squares = np.asarray(self.amplitudes, dtype=float) ** 2
+        total = squares.sum()
+        return squares / total if total != 0.0 else squares
+
+    @property
+    def ratio(self) -> float:
+        """``c_last / c_first``, the analogue of ``c_K / c_pi`` of their eq. (115)."""
+        first = float(self.amplitudes[0])
+        return float(self.amplitudes[-1]) / first if first != 0.0 else np.inf
+
+    def is_simple(self, tolerance: float = 1e-6) -> bool:
+        """Whether the zero is simple, so that the content is well defined."""
+        scale = self.spread if self.spread > 0.0 else 1.0
+        return bool(self.gap > tolerance * scale and abs(self.eigenvalue) < self.gap)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        content = ", ".join(
+            f"P{N}={value:.4f}" for N, value in zip(self.sectors, self.content)
+        )
+        return (
+            f"EigenState(E={self.energy:.8f}, {content}, "
+            f"eigenvalue={self.eigenvalue:.2e}, gap={self.gap:.2e})"
+        )
 
 
 class QC:
@@ -156,36 +230,150 @@ class QC:
         lam = self.lam[None, :, :] if g.ndim == 3 else self.lam
         return np.linalg.det(inverse - lam)
 
-    def null_vector(self, E: float) -> Array:
-        """The vector ``w`` with ``(1 - lambda G) w = 0`` at a solution.
+    # -- particle-number content: the eigenvalue method ----------------------
 
-        If ``v`` spans the kernel of ``G^{-1} - lambda``, then ``w = lambda v =
-        G^{-1} v`` spans the kernel of ``1 - lambda G``.  It is ``w``, not ``v``,
-        that multiplies the states ``Ghat |u_N>`` in the residue of the resolvent,
-        and the pole-free form used here stays accurate next to the poles of
-        ``G``, where ``G^{-1}`` is numerically ill-conditioned.
+    def sector_norms(self, E: float) -> Array:
+        """``D_N = || Ghat |u_N> || = sqrt(-dG_NN/dE)``, one per sector.
+
+        These are the kinematic normalizations of the sector states, and play
+        the role of the phase-space matrix ``P`` of Hansen and Sharpe, eq. (46)
+        of arXiv:1204.0826.  They are strictly positive away from the poles of
+        ``G``, since ``-dG_NN/dE`` is a sum of squares over the levels.
         """
-        matrix = np.eye(len(self.sectors)) - self.lam @ self.G(float(E))
-        _, _, right = np.linalg.svd(matrix)
-        return right[-1]
+        return np.array(
+            [
+                np.sqrt(-float(self.G.sectors[N].derivative(float(E))))
+                for N in self.sectors
+            ],
+            dtype=float,
+        )
 
-    def content(self, E: float) -> Array:
-        """Relative particle-number content of the finite-volume state at ``E``.
+    def eigen_matrix(self, E: float) -> Array:
+        """The symmetric matrix whose null eigenvector is the amplitude vector.
+
+        Following the eigenvalue method of Hansen and Sharpe, arXiv:1204.0826,
+        section V, the quantization condition is written as a symmetric matrix
+        whose kinematic normalization has been stripped off, and the relative
+        content of the channels is read off from its zero eigenvector, their
+        eqs. (115)-(116).
+
+        Here the kinematics-free form of the condition is
+
+            Y(E) = G(E, L) - lambda^{-1} ,
+
+        whose kernel is the vector ``w`` of section 2.3: ``(G - lambda^{-1}) w
+        = 0`` is ``(1 - lambda G) w = 0`` multiplied by ``lambda^{-1}``.  The
+        normalized form is then
+
+            X(E) = D^{-1} Y(E) D^{-1} ,   D = diag(sqrt(-dG_NN/dE)) ,
+
+        the analogue of ``X = P^{-1} Y P^{-1}``, their eq. (99).  Its null
+        eigenvector is ``c = D w``, whose components are the amplitudes of the
+        finite-volume state in an orthonormal basis of sector states, so that
+        ``P_N = c_N^2`` with ``c`` unit normalized.
+
+        Two properties make this the form to diagonalize numerically.  It is
+        real symmetric, so ``eigh`` returns real eigenvalues and an orthonormal
+        eigenbasis.  And it is bounded near the poles of ``G``: there
+        ``G_NN ~ r/(E-E_p)`` while ``D_N ~ sqrt(r)/|E-E_p|``, so the division by
+        ``D`` cancels the pole, whereas ``1 - lambda G`` itself diverges.  The
+        content is largest exactly next to those poles.
+        """
+        energy = float(E)
+        g = np.atleast_2d(self.G(energy))
+        inverse_lambda = self._inverse_couplings()
+        scale = 1.0 / self.sector_norms(energy)
+        matrix = (g - inverse_lambda) * scale[:, None] * scale[None, :]
+        return 0.5 * (matrix + matrix.T)
+
+    def _inverse_couplings(self) -> Array:
+        """``lambda^{-1}``, symmetrized, with a check that ``lambda`` inverts.
+
+        The eigenvalue form needs the inverse: it is the coupling matrix that
+        carries the mixing between sectors, and a singular ``lambda`` has a
+        direction that decouples from ``G`` altogether.
+        """
+        lam = self.lam
+        condition = np.linalg.cond(lam)
+        if not np.isfinite(condition) or condition > 1.0 / np.sqrt(EPS):
+            raise np.linalg.LinAlgError(
+                f"the coupling matrix is singular (cond = {condition:.3e}); "
+                "the eigenvalue form of the content needs lambda^{-1}. "
+                "Use QC.content(E, method='svd') instead."
+            )
+        inverse = np.linalg.inv(lam)
+        return 0.5 * (inverse + inverse.T)
+
+    def eigen_state(self, E: float) -> "EigenState":
+        """Diagonalize ``eigen_matrix`` and return the null branch at ``E``.
+
+        At a solution of the quantization condition one eigenvalue of ``X(E)``
+        vanishes; its eigenvector is the amplitude vector ``c``.  Away from a
+        solution no eigenvalue vanishes, and the smallest one in magnitude
+        measures how far ``E`` is from a root, in units set by the spectrum of
+        ``X``.  The gap to the next eigenvalue is the diagnostic for the
+        assumption of section 2.3 that the zero is simple: two small
+        eigenvalues mean a degenerate solution, for which the residue of the
+        resolvent is not rank one and the content is not defined by a single
+        vector.
+        """
+        energy = float(E)
+        values, vectors = np.linalg.eigh(self.eigen_matrix(energy))
+        order = np.argsort(np.abs(values))
+        null = int(order[0])
+        amplitudes = np.asarray(vectors[:, null], dtype=float)
+        # fix the sign convention: the largest component is positive
+        if amplitudes[int(np.argmax(np.abs(amplitudes)))] < 0.0:
+            amplitudes = -amplitudes
+        scale = 1.0 / self.sector_norms(energy)
+        weights = amplitudes * scale
+        norm = np.linalg.norm(weights)
+        spread = float(np.max(np.abs(values)))
+        return EigenState(
+            energy=energy,
+            sectors=self.sectors,
+            amplitudes=amplitudes,
+            weights=weights / norm if norm != 0.0 else weights,
+            eigenvalue=float(values[null]),
+            gap=float(np.abs(values[int(order[1])])) if len(values) > 1 else np.inf,
+            spread=spread,
+        )
+
+    def content(self, E: float, method: str = "eigen") -> Array:
+        """Particle-number content of the finite-volume state at ``E``.
 
         The pole part of the resummed series of section 2.1 is
 
             Ghat |u_N'> [lambda (1 - G lambda)^{-1}]_{N'N} <u_N| Ghat ,
 
-        so at a solution the state is ``|psi> ~ sum_N w_N Ghat |u_N>`` with ``w``
-        the kernel vector above.  Since ``Ghat`` does not mix particle numbers
-        here, the overlap with the ``N``-particle sector is
+        so at a solution the state is ``|psi> ~ sum_N w_N Ghat |u_N>``.  Since
+        ``Ghat`` does not mix particle numbers here, the overlap with the
+        ``N``-particle sector is
 
-            <psi| Pi_N |psi> = w_N^2 <u_N| Ghat^2 |u_N> = -w_N^2 dG_{NN}/dE ,
+            <psi| Pi_N |psi> = w_N^2 <u_N| Ghat^2 |u_N> = -w_N^2 dG_NN/dE ,
 
         which gives the four- and two-particle contents of figure 2 of the
-        draft.  Section 2.3 is still a placeholder there, so this normalization
-        should be revisited once the residues are written out.
+        draft.  The amplitudes ``c_N = w_N sqrt(-dG_NN/dE)`` are therefore the
+        natural objects, and ``method="eigen"`` (the default) obtains them in
+        one step as the null eigenvector of the symmetric matrix of
+        ``eigen_matrix``, the eigenvalue method of Hansen and Sharpe,
+        arXiv:1204.0826, eqs. (115)-(116).  Then ``P_N = c_N^2``.
+
+        ``method="svd"`` is the earlier route, kept as a cross-check: it takes
+        the smallest right singular vector of the non-symmetric ``1 - lambda
+        G``, giving ``w`` directly, and rescales by ``-dG_NN/dE`` afterwards.
+        The two agree analytically; the eigenvalue form is better conditioned
+        next to the poles of ``G``, where the rescaling in the ``svd`` route
+        multiplies a small number by a very large one.
         """
+        if method == "eigen":
+            return self.eigen_state(E).content
+        if method == "svd":
+            return self.content_svd(E)
+        raise ValueError(f"unknown content method {method!r}; use 'eigen' or 'svd'")
+
+    def content_svd(self, E: float) -> Array:
+        """``content`` by the singular-vector route, kept as a cross-check."""
         vector = self.null_vector(E)
         weights = np.array(
             [
@@ -196,6 +384,23 @@ class QC:
         )
         total = weights.sum()
         return weights / total if total != 0 else weights
+
+    def null_vector(self, E: float) -> Array:
+        """The vector ``w`` with ``(1 - lambda G) w = 0`` at a solution.
+
+        If ``v`` spans the kernel of ``G^{-1} - lambda``, then ``w = lambda v =
+        G^{-1} v`` spans the kernel of ``1 - lambda G``.  It is ``w``, not ``v``,
+        that multiplies the states ``Ghat |u_N>`` in the residue of the resolvent,
+        and the pole-free form used here stays accurate next to the poles of
+        ``G``, where ``G^{-1}`` is numerically ill-conditioned.
+
+        This is the input to ``content_svd``; the default ``content`` route gets
+        the same direction from the symmetric eigenproblem of ``eigen_matrix``,
+        already rescaled into amplitudes.
+        """
+        matrix = np.eye(len(self.sectors)) - self.lam @ self.G(float(E))
+        _, _, right = np.linalg.svd(matrix)
+        return right[-1]
 
     # -- levels -------------------------------------------------------------
 

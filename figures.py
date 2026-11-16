@@ -244,10 +244,18 @@ def content_figure(
     """Figure 2: the four-particle content of each finite-volume state.
 
     The content is recomputed from the saved roots, since it needs ``G`` itself
-    and not only the energies.  Each level is then drawn as one continuous
-    curve, interpolated between the volumes of the scan and coloured along its
-    length by the content, so that an avoided crossing reads as a gradient from
-    one sector into the other rather than as a change of marker colour.
+    and not only the energies.  It comes from the eigenvalue method of Hansen
+    and Sharpe, arXiv:1204.0826 section V: the symmetric matrix ``X(E) =
+    D^{-1}[G - lambda^{-1}] D^{-1}`` of ``QC.eigen_matrix`` is diagonalized at
+    each solution and the squared components of its null eigenvector are the
+    content, their eqs. (115)-(116).  The eigenvalue of that branch is a
+    residual on the root and the gap to the next one certifies that the zero is
+    simple; a solution failing that test is left blank rather than coloured.
+
+    Each level is then drawn as one continuous curve, interpolated between the
+    volumes of the scan and coloured along its length by the content, so that an
+    avoided crossing reads as a gradient from one sector into the other rather
+    than as a change of marker colour.
 
     The content swaps over a range in ``mL`` set by the gap of the avoided
     crossing, which is narrow, so the scan itself has to resolve it: give
@@ -265,6 +273,7 @@ def content_figure(
 
     energies = level_tracks(result["roots"])
     content = np.full_like(energies, np.nan)
+    degenerate = 0
 
     tables = None
     for index, mL in enumerate(mLs):
@@ -281,7 +290,11 @@ def content_figure(
         for column, energy in enumerate(energies[index]):
             if np.isnan(energy):
                 continue
-            content[index, column] = qc.content(float(energy))[-1]
+            state = qc.eigen_state(float(energy))
+            if not state.is_simple():
+                degenerate += 1
+                continue
+            content[index, column] = state.content[-1]
 
     _, ax = plt.subplots(1, 1, figsize=figsize, layout="constrained")
     norm = Normalize(vmin=0.0, vmax=1.0)
@@ -290,7 +303,9 @@ def content_figure(
     bar = plt.colorbar(
         ScalarMappable(norm=norm, cmap=cmap), ax=ax, pad=0.02, aspect=45
     )
-    bar.set_label("four-particle content", size=9)
+    bar.set_label(r"four-particle content $P_4$", size=9)
+    if degenerate:
+        print(f"[warn] {degenerate} solutions with a non-simple zero, left blank")
 
     ax.set_title(coupling_title(couplings), size=8)
     ax.set_xlabel(r"$mL$", size=12)

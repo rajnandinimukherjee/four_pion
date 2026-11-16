@@ -114,19 +114,33 @@ def ensure_orbits(
 
 
 def content_at(qc: QC, energy: float) -> Array | None:
-    """``qc.content`` at a root, or ``None`` where it cannot be taken.
+    """The particle-number content at a root, or ``None`` where it is not defined.
 
-    A root can land within rounding of a pole of ``G``, which happens when its
-    shift off that pole is below ``eps`` relative: ``G`` is then infinite and
-    the SVD in ``null_vector`` has nothing to work with.  Such a level is
-    decoupled from the connected vertex -- the opposite of a crossing -- so
-    nothing is lost by passing over it.
+    This is the eigenvalue method of Hansen and Sharpe (``QC.eigen_state``):
+    the squared components of the null eigenvector of the symmetric
+    ``X(E) = D^{-1}[G - lambda^{-1}] D^{-1}``.  It is the right route for this
+    search, which looks for the levels sitting closest to a crossing.  Those are
+    the levels next to a pole of ``G``, and that is exactly where ``X`` stays
+    bounded -- the pole cancels between ``G_NN`` and ``D_N`` -- while the
+    ``1 - lambda G`` of the singular-vector route diverges.
+
+    ``None`` is returned where the content is not a single vector's worth.  A
+    root can land within rounding of a pole, where ``G`` is infinite; and
+    ``is_simple`` rejects a degenerate zero, for which the residue of the
+    resolvent is not rank one and no one eigenvector carries the content.
+    Neither is a crossing, so the search loses nothing by passing over them.
+
+    A singular ``lambda`` raises, since the eigenvalue form needs
+    ``lambda^{-1}``; ``QC.content(E, method="svd")`` is the fallback there.
     """
     with np.errstate(all="ignore"):
         try:
-            content = qc.content(float(energy))
+            state = qc.eigen_state(float(energy))
         except np.linalg.LinAlgError:
             return None
+        if not state.is_simple():
+            return None
+        content = state.content
     return content if np.all(np.isfinite(content)) else None
 
 
@@ -145,9 +159,9 @@ def crossings(
 
     Following tracks through the spectrum and looking for a local minimum of
     the spacing is delicate once the levels are dense.  The particle-number
-    content says it directly: away from a crossing a finite-volume state is
-    almost entirely one sector, and at the closest approach of two levels it is
-    an even mixture of the two.  A root whose second-largest content exceeds
+    content of ``content_at`` says it directly: away from a crossing a
+    finite-volume state is almost entirely one sector, and at the closest
+    approach of two levels it is an even mixture of the two.  A root whose second-largest content exceeds
     ``mixing`` is therefore near a crossing, and the gap there is its distance
     to the partner it is repelling, whichever neighbour is nearer.
 
